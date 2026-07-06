@@ -1,0 +1,22 @@
+# Python Caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Large Binaries (GitHub file limit is 100MB; ffmpeg.exe is 136MB and must be ignored)
+ffmpeg.exe
+go2rtc.exe
+
+# Logs and Local Database files
+*.log
+*.db
+lpr_data/
+scratch/
+
+# IDE / System files
+.gemini/
+.agents/
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

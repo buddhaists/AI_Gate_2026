@@ -1,0 +1,8 @@
+15:48:03.293 INF go2rtc platform=windows/amd64 revision=b5948cf version=1.9.14
+15:48:03.339 INF config path="D:\\AntiGravity\\ai camera-gate\\go2rtc.yaml"
+15:48:03.340 INF [rtsp] listen addr=:8554
+15:48:03.340 INF [api] listen addr=:1984
+15:48:03.362 INF [webrtc] listen tcp addr=[::]:8555
+15:48:03.378 INF [webrtc] listen udp addr=172.27.208.1:8555
+15:48:03.379 INF [webrtc] listen udp addr=192.168.1.93:8555
+15:48:03.379 INF [webrtc] listen udp addr=172.21.128.1:8555

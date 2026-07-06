@@ -1,0 +1,6 @@
+{
+  "rtsp_url_gate": "rtsp://admin:%40fsps087525402@192.168.1.131:554/chID=1&streamType=main",
+  "rtsp_url_gate_002": "rtsp://admin:%40fsps087525402@192.168.1.138:554/chID=5&streamType=main",
+  "web_username": "admin",
+  "web_password_default": "3762828"
+}

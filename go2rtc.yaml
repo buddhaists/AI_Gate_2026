@@ -1,0 +1,12 @@
+api:
+  listen: ":1984"
+
+rtsp:
+  listen: ":8554"
+
+ffmpeg:
+  bin: "D:/AntiGravity/ffmpeg.exe"
+
+streams:
+  camera1: "exec:D:/AntiGravity/ffmpeg.exe -analyzeduration 10000000 -probesize 10000000 -i rtsp://admin:@Fsps087525402@192.168.1.138:554/chID=5&streamType=main -c copy -an -f rtsp {output}"
+  camera3: "rtsp://admin:@fsps087525402@192.168.1.131:554/chID=1&streamType=main"

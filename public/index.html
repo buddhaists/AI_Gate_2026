@@ -1,0 +1,808 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 智慧學校大門車牌監控系統 v3.1</title>
+    <!-- Modern Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=Noto+Sans+TC:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <!-- FontAwesome for Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Custom Style -->
+    <link rel="stylesheet" href="style.css?v=4">
+    <!-- Chart.js for beautiful analytics -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="app-container">
+        
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar-nav">
+            <div class="sidebar-brand">
+                <i class="fa-solid fa-microchip-ai brand-icon"></i>
+                <div class="brand-text">
+                    <h1>AI GATE</h1>
+                    <span>智慧車牌監控</span>
+                </div>
+            </div>
+            <nav class="nav-menu">
+                <button class="nav-item active" onclick="switchTab('dashboard')">
+                    <i class="fa-solid fa-chart-line"></i> 即時儀表板
+                </button>
+                <button class="nav-item" onclick="switchTab('history')">
+                    <i class="fa-solid fa-list-check"></i> 歷史紀錄查詢
+                </button>
+                <button class="nav-item" onclick="switchTab('watchlist')">
+                    <i class="fa-solid fa-bell"></i> 追蹤名單設定
+                </button>
+                <button class="nav-item" onclick="switchTab('settings')">
+                    <i class="fa-solid fa-gear"></i> 系統網址設定
+                </button>
+                <button class="nav-item" onclick="switchTab('about')">
+                    <i class="fa-solid fa-circle-info"></i> 關於本系統
+                </button>
+            </nav>
+            <div class="sidebar-footer" style="display: flex; flex-direction: column; gap: 12px;">
+                <div class="status-indicator">
+                    <span id="status-pulse" class="pulse-dot"></span>
+                    <span id="status-text" class="status-text">相機連接正常</span>
+                </div>
+                <div class="status-indicator" style="margin-top: -6px; margin-bottom: -6px; opacity: 0.5; font-size: 11px;">
+                    <i class="fa-solid fa-code-branch"></i> <span class="status-text" style="font-size: 11px;">系統版本: v3.1 (7/5 RTSP中介代理版)</span>
+                </div>
+                <div class="status-indicator" style="margin-top: -4px;">
+                    <span id="gate-pulse" class="pulse-dot" style="background-color: var(--color-red);"></span>
+                    <span id="gate-text" class="status-text">大門已關閉</span>
+                </div>
+                <button id="btn-system-toggle" class="btn btn-primary btn-sm" onclick="toggleSystemStatus()" style="width: 100%; justify-content: center; font-size: 13px;">
+                    <i class="fa-solid fa-pause"></i> 暫停監控系統
+                </button>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="main-content">
+            
+            <!-- Top Header -->
+            <header class="app-header">
+                <div class="header-title">
+                    <h2>學校大門監控中心</h2>
+                    <p class="subtitle">即時影像辨識與進出紀錄系統</p>
+                </div>
+                <div class="header-meta">
+                    <div class="camera-selector">
+                        <i class="fa-solid fa-video"></i>
+                        <select id="header-camera-select" onchange="filterDashboardByCamera(this.value)">
+                            <!-- Populated dynamically -->
+                        </select>
+                    </div>
+                    <div id="live-time" class="live-clock">12:00:00</div>
+                </div>
+            </header>
+
+            <!-- TAB 1: DASHBOARD -->
+            <section id="tab-dashboard" class="tab-section active">
+                <!-- Today's Watchlist Alerts Board (Newly added alert summary) -->
+                <div id="today-alerts-board" class="glass-card alerts-summary-card hidden collapsed">
+                    <div class="card-header alert-header" onclick="toggleAlertsBoard()" style="cursor: pointer; user-select: none;">
+                        <h3><i class="fa-solid fa-triangle-exclamation"></i> 今日追蹤車輛進出提醒</h3>
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <span id="alerts-count-badge" class="badge alert-count-badge">0</span>
+                            <i id="alerts-toggle-icon" class="fa-solid fa-chevron-up" style="font-size: 14px; transition: transform 0.2s;"></i>
+                        </div>
+                    </div>
+                    <div id="today-alerts-list" class="alerts-summary-list">
+                        <!-- Alert logs listed here -->
+                    </div>
+                </div>
+
+                <div class="dashboard-grid">
+                    
+                    <!-- Left Column: Video & Charts -->
+                    <div class="grid-left">
+                        <!-- Video Card -->
+                        <div class="glass-card video-card">
+                            <div class="card-header">
+                                <h3><i class="fa-solid fa-video red-icon"></i> 即時監控畫面</h3>
+                                <span class="badge live-badge">LIVE</span>
+                            </div>
+                            <div class="video-container">
+                                <!-- MJPEG Stream from Python API -->
+                                <img id="stream-img" src="/api/stream" alt="Live Camera Stream" onerror="console.warn('Stream load error')">
+                                <div id="stream-fallback" class="stream-fallback hidden">
+                                    <i class="fa-solid fa-triangle-exclamation"></i>
+                                    <p>無法取得影像串流，請確認後端服務是否正常執行</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Stats Quick Cards -->
+                        <div class="stats-row">
+                            <div class="glass-card stat-box">
+                                <div class="stat-icon purple-bg"><i class="fa-solid fa-car"></i></div>
+                                <div class="stat-info">
+                                    <span class="stat-label">今日進出車次</span>
+                                    <span id="stat-total" class="stat-value">0</span>
+                                </div>
+                            </div>
+                            <div class="glass-card stat-box">
+                                <div class="stat-icon green-bg"><i class="fa-solid fa-id-card"></i></div>
+                                <div class="stat-info">
+                                    <span class="stat-label">最新辨識</span>
+                                    <span id="stat-latest" class="stat-value">---</span>
+                                </div>
+                            </div>
+                            <div class="glass-card stat-box">
+                                <div class="stat-icon blue-bg"><i class="fa-solid fa-motorcycle"></i></div>
+                                <div class="stat-info">
+                                    <span class="stat-label">今日汽車 / 機車</span>
+                                    <span id="stat-split" class="stat-value">0 / 0</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Charts Card -->
+                        <div class="glass-card chart-card">
+                            <div class="card-header">
+                                <h3><i class="fa-solid fa-chart-column"></i> 今日車流量 analysis</h3>
+                            </div>
+                            <div class="chart-container">
+                                <canvas id="hourlyChart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Right Column: Real-time feed -->
+                    <div class="grid-right">
+                        <div class="glass-card feed-card">
+                            <div class="card-header">
+                                <h3><i class="fa-solid fa-bolt"></i> 即時車牌辨識流</h3>
+                                <span id="feed-count-badge" class="badge count-badge">0</span>
+                            </div>
+                            <div id="live-feed-list" class="feed-list">
+                                <div class="feed-empty">
+                                    <i class="fa-solid fa-circle-notch fa-spin"></i>
+                                    <p>正在等待車輛經過...</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                </div>
+            </section>
+
+            <!-- TAB 2: HISTORY QUERY -->
+            <section id="tab-history" class="tab-section">
+                <div class="glass-card history-card">
+                    <div class="card-header">
+                        <h3><i class="fa-solid fa-search"></i> 歷史紀錄查詢</h3>
+                    </div>
+                    
+                    <!-- Search Filter Form (Date range & Export added) -->
+                    <div class="filter-bar">
+                        <div class="filter-group">
+                            <label for="filter-search"><i class="fa-solid fa-magnifying-glass"></i> 車牌搜尋</label>
+                            <input type="text" id="filter-search" placeholder="請輸入車牌 (例如: ABC-1234)">
+                        </div>
+                        <div class="filter-group">
+                            <label for="filter-start-date"><i class="fa-solid fa-calendar"></i> 開始日期</label>
+                            <input type="date" id="filter-start-date">
+                        </div>
+                        <div class="filter-group">
+                            <label for="filter-end-date"><i class="fa-solid fa-calendar"></i> 結束日期</label>
+                            <input type="date" id="filter-end-date">
+                        </div>
+                        <div class="filter-group button-group">
+                            <button class="btn btn-primary" onclick="queryHistory(0)"><i class="fa-solid fa-filter"></i> 篩選</button>
+                            <button class="btn btn-secondary" onclick="exportToCSV()"><i class="fa-solid fa-file-export"></i> 匯出 CSV</button>
+                            <button class="btn btn-secondary" onclick="resetFilters()"><i class="fa-solid fa-rotate-left"></i> 重設</button>
+                        </div>
+                    </div>
+
+                    <!-- History Table -->
+                    <div class="table-container">
+                        <table class="history-table">
+                            <thead>
+                                <tr>
+                                    <th>時間</th>
+                                    <th>車牌</th>
+                                    <th>信心度</th>
+                                    <th>追蹤標記</th>
+                                    <th>車牌截圖</th>
+                                    <th>完整照片</th>
+                                </tr>
+                            </thead>
+                            <tbody id="history-tbody">
+                                <!-- Populated dynamically -->
+                            </tbody>
+                        </table>
+                        <div id="history-empty" class="table-empty hidden">
+                            <i class="fa-solid fa-folder-open"></i>
+                            <p>沒有找到符合條件的紀錄</p>
+                        </div>
+                    </div>
+
+                    <!-- Pagination Controls -->
+                    <div class="pagination-bar">
+                        <button id="btn-prev-page" class="btn btn-secondary btn-sm" onclick="changePage(-1)" disabled>
+                            <i class="fa-solid fa-chevron-left"></i> 上一頁
+                        </button>
+                        <span id="page-indicator" class="page-indicator">第 1 頁 / 共 1 頁</span>
+                        <button id="btn-next-page" class="btn btn-secondary btn-sm" onclick="changePage(1)" disabled>
+                            下一頁 <i class="fa-solid fa-chevron-right"></i>
+                        </button>
+                    </div>
+
+                </div>
+            </section>
+
+            <!-- TAB 3: WATCHLIST CONFIG (Newly added) -->
+            <section id="tab-watchlist" class="tab-section">
+                <div class="watchlist-grid">
+                    <!-- Left: Add Form -->
+                    <div class="glass-card watchlist-form-card">
+                        <div class="card-header">
+                            <h3><i class="fa-solid fa-circle-plus"></i> 新增追蹤車牌</h3>
+                        </div>
+                        <form id="watchlist-form" onsubmit="addWatchlistItem(event)" class="watchlist-form">
+                            <div class="form-group">
+                                <label for="watch-plate">車牌號碼</label>
+                                <input type="text" id="watch-plate" required placeholder="例如: ABC-1234" style="text-transform: uppercase;">
+                            </div>
+                            <div class="form-group">
+                                <label for="watch-category">追蹤類別</label>
+                                <select id="watch-category" required>
+                                    <option value="BLACKLIST">BLACKLIST (黑名單 / 警報)</option>
+                                    <option value="VIP">VIP (重要貴賓 / 提醒)</option>
+                                    <option value="SUSPICIOUS">SUSPICIOUS (可疑車輛)</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="watch-description">說明備註</label>
+                                <input type="text" id="watch-description" placeholder="備註說明 (例如: 違規車輛、校長專車)">
+                            </div>
+                            <button type="submit" class="btn btn-primary btn-block"><i class="fa-solid fa-floppy-disk"></i> 儲存追蹤設定</button>
+                        </form>
+                    </div>
+
+                    <!-- Right: Current List -->
+                    <div class="glass-card watchlist-table-card">
+                        <div class="card-header">
+                            <h3><i class="fa-solid fa-list-ul"></i> 目前追蹤名單</h3>
+                        </div>
+                        <div class="table-container">
+                            <table class="history-table">
+                                <thead>
+                                    <tr>
+                                        <th>車牌號碼</th>
+                                        <th>追蹤類別</th>
+                                        <th>說明備註</th>
+                                        <th>新增時間</th>
+                                        <th>操作</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="watchlist-tbody">
+                                    <!-- Populated dynamically -->
+                                </tbody>
+                            </table>
+                            <div id="watchlist-empty" class="table-empty hidden">
+                                <i class="fa-solid fa-circle-info"></i>
+                                <p>目前沒有設定任何追蹤車牌</p>
+                            </div>
+                        </div>
+                        <!-- Pagination Controls for Watchlist -->
+                        <div class="pagination-bar">
+                            <button id="btn-watchlist-prev-page" class="btn btn-secondary btn-sm" onclick="changeWatchlistPage(-1)" disabled>
+                                <i class="fa-solid fa-chevron-left"></i> 上一頁
+                            </button>
+                            <span id="watchlist-page-indicator" class="page-indicator">第 1 頁 / 共 1 頁</span>
+                            <button id="btn-watchlist-next-page" class="btn btn-secondary btn-sm" onclick="changeWatchlistPage(1)" disabled>
+                                下一頁 <i class="fa-solid fa-chevron-right"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- TAB 4: SYSTEM SETTINGS -->
+            <section id="tab-settings" class="tab-section">
+                <!-- Settings Sub Tabs Navigation -->
+                <div class="settings-sub-nav" style="display: flex; gap: 8px; margin-bottom: 24px; border-bottom: 1px solid rgba(255,255,255,0.06); padding-bottom: 12px; font-family: var(--font-tc);">
+                    <button type="button" class="sub-nav-item active" onclick="switchSettingsSubTab('camera')" style="background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); color: var(--text-primary); padding: 8px 16px; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 6px; transition: all 0.2s; height: 36px; outline: none;">
+                        <i class="fa-solid fa-video"></i> 攝影機管理
+                    </button>
+                    <button type="button" class="sub-nav-item" onclick="switchSettingsSubTab('auth')" style="background: transparent; border: 1px solid transparent; color: var(--text-secondary); padding: 8px 16px; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 6px; transition: all 0.2s; height: 36px; outline: none;">
+                        <i class="fa-solid fa-lock"></i> 網頁帳密設定
+                    </button>
+                    <button type="button" class="sub-nav-item" onclick="switchSettingsSubTab('telegram')" style="background: transparent; border: 1px solid transparent; color: var(--text-secondary); padding: 8px 16px; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 6px; transition: all 0.2s; height: 36px; outline: none;">
+                        <i class="fa-solid fa-paper-plane"></i> Telegram 推播
+                    </button>
+                    <button type="button" class="sub-nav-item" onclick="switchSettingsSubTab('maintenance')" style="background: transparent; border: 1px solid transparent; color: var(--text-secondary); padding: 8px 16px; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 6px; transition: all 0.2s; height: 36px; outline: none;">
+                        <i class="fa-solid fa-screwdriver-wrench"></i> 系統維運設定
+                    </button>
+                    <button type="button" class="sub-nav-item" onclick="switchSettingsSubTab('help')" style="background: transparent; border: 1px solid transparent; color: var(--text-secondary); padding: 8px 16px; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 6px; transition: all 0.2s; height: 36px; outline: none;">
+                        <i class="fa-solid fa-circle-question"></i> 設定說明
+                    </button>
+                </div>
+
+                <!-- Sub Tab: Camera Management -->
+                <div id="settings-sub-camera" class="settings-sub-section">
+                    <div class="watchlist-grid">
+                        <!-- Left: Camera Form (Add / Edit) -->
+                        <div class="glass-card watchlist-form-card">
+                            <div class="card-header">
+                                <h3 id="settings-form-title"><i class="fa-solid fa-circle-plus"></i> 新增/修改攝影機</h3>
+                            </div>
+                            <form id="settings-form" onsubmit="saveCameraSettings(event)" class="watchlist-form">
+                                <input type="hidden" id="settings-camera-id" value="">
+                                <div class="form-group">
+                                    <label for="settings-camera-name">攝影機名稱</label>
+                                    <input type="text" id="settings-camera-name" required placeholder="例如: 學校大門">
+                                </div>
+                                <div class="form-group">
+                                    <label for="settings-rtsp-url">RTSP 訊源網址</label>
+                                    <input type="text" id="settings-rtsp-url" required placeholder="例如: rtsp://username:password@ip:554/chID=1">
+                                </div>
+                                <div class="form-group button-group" style="display: flex; gap: 8px; margin-top: 10px;">
+                                    <button type="submit" class="btn btn-primary" style="flex: 1; justify-content: center; height: 42px;"><i class="fa-solid fa-floppy-disk"></i> 儲存設定</button>
+                                    <button type="button" id="btn-cancel-edit-cam" class="btn btn-secondary hidden" onclick="cancelCameraEdit()" style="justify-content: center; height: 42px;"><i class="fa-solid fa-xmark"></i> 取消</button>
+                                </div>
+                            </form>
+                        </div>
+
+                        <!-- Right: Camera List -->
+                        <div class="glass-card watchlist-table-card">
+                            <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+                                <h3><i class="fa-solid fa-list-ul"></i> 攝影機管理清單</h3>
+                                <div style="display: flex; gap: 8px;">
+                                    <button type="button" class="btn btn-secondary btn-sm" onclick="changeActiveCamera('all')" style="padding: 4px 10px; font-size: 11px; color: var(--color-primary); border: 1px solid rgba(16,185,129,0.3); background: rgba(16,185,129,0.05); height: 28px;"><i class="fa-solid fa-play"></i> 全部啟用</button>
+                                    <button type="button" class="btn btn-secondary btn-sm" onclick="changeActiveCamera('none')" style="padding: 4px 10px; font-size: 11px; color: var(--color-yellow); border: 1px solid rgba(245,158,11,0.3); background: rgba(245,158,11,0.05); height: 28px;"><i class="fa-solid fa-pause"></i> 全部停用</button>
+                                </div>
+                            </div>
+                            <div class="table-container">
+                                <table class="history-table">
+                                    <thead>
+                                        <tr>
+                                            <th>名稱</th>
+                                            <th>RTSP 訊源網址</th>
+                                            <th>狀態</th>
+                                            <th>操作</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="cameras-tbody">
+                                        <!-- Populated dynamically -->
+                                    </tbody>
+                                </table>
+                                <div id="cameras-empty" class="table-empty hidden">
+                                    <i class="fa-solid fa-circle-info"></i>
+                                    <p>目前沒有設定任何攝影機</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Sub Tab: Web Auth Settings -->
+                <div id="settings-sub-auth" class="settings-sub-section" style="display: none;">
+                    <div style="max-width: 600px; margin: 0 auto;">
+                        <div class="glass-card watchlist-form-card" style="padding: 24px;">
+                            <div class="card-header" style="margin-bottom: 20px;">
+                                <h3><i class="fa-solid fa-lock" style="color: var(--color-blue); margin-right: 8px;"></i> 網頁登入帳密設定 (Basic Auth)</h3>
+                            </div>
+                            <form id="auth-settings-form" onsubmit="saveAuthSettings(event)" class="watchlist-form">
+                                <div class="form-row" style="display: flex; flex-direction: column; gap: 16px;">
+                                    <div class="form-group" style="flex: 1; display: flex; flex-direction: column; gap: 6px;">
+                                        <label for="auth-username" style="font-weight: 600; font-size: 13px; color: var(--text-primary);"><i class="fa-solid fa-user" style="margin-right: 4px; font-size: 11px;"></i> 管理員帳號</label>
+                                        <input type="text" id="auth-username" required placeholder="例如: admin" style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.1); background: rgba(0, 0, 0, 0.2); color: #fff; font-size: 13px;">
+                                    </div>
+                                    <div class="form-group" style="flex: 1; display: flex; flex-direction: column; gap: 6px;">
+                                        <label for="auth-password" style="font-weight: 600; font-size: 13px; color: var(--text-primary);"><i class="fa-solid fa-key" style="margin-right: 4px; font-size: 11px;"></i> 新管理員密碼</label>
+                                        <input type="password" id="auth-password" placeholder="若不修改請留空，預設為 3762828" style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.1); background: rgba(0, 0, 0, 0.2); color: #fff; font-size: 13px;">
+                                    </div>
+                                </div>
+                                <div class="form-group button-group" style="display: flex; gap: 8px; margin-top: 20px;">
+                                    <button type="submit" class="btn btn-primary" style="flex: 1; justify-content: center; height: 42px;"><i class="fa-solid fa-floppy-disk"></i> 儲存密碼設定</button>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Sub Tab: Telegram Push Settings -->
+                <div id="settings-sub-telegram" class="settings-sub-section" style="display: none;">
+                    <div style="max-width: 600px; margin: 0 auto;">
+                        <div class="glass-card watchlist-form-card">
+                            <div class="card-header">
+                                <h3><i class="fa-solid fa-paper-plane" style="color: var(--color-blue); margin-right: 8px;"></i> Telegram 即時推播設定</h3>
+                            </div>
+                            <form id="telegram-settings-form" onsubmit="saveTelegramSettings(event)" class="watchlist-form">
+                                <div class="form-group" style="display: flex; align-items: center; gap: 8px; margin-bottom: 16px; margin-top: 8px;">
+                                    <input type="checkbox" id="tg-enabled" style="width: 18px; height: 18px; cursor: pointer; margin: 0;">
+                                    <label for="tg-enabled" style="margin: 0; cursor: pointer; color: var(--text-primary); font-weight: 600; font-size: 13px;">啟用 Telegram 推播警報</label>
+                                </div>
+                                <div class="form-group">
+                                    <label for="tg-bot-token"><i class="fa-solid fa-key" style="margin-right: 4px; font-size: 11px;"></i> Telegram Bot Token</label>
+                                    <input type="password" id="tg-bot-token" placeholder="例如: 123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ" style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.1); background: rgba(0, 0, 0, 0.2); color: #fff; font-size: 13px;">
+                                </div>
+                                <div class="form-group">
+                                    <label for="tg-chat-id"><i class="fa-solid fa-hashtag" style="margin-right: 4px; font-size: 11px;"></i> Telegram Chat ID (群組或個人 ID)</label>
+                                    <input type="text" id="tg-chat-id" placeholder="例如: -1001234567890 或 987654321" style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.1); background: rgba(0, 0, 0, 0.2); color: #fff; font-size: 13px;">
+                                </div>
+                                <div class="form-group button-group" style="display: flex; gap: 8px; margin-top: 16px;">
+                                    <button type="submit" class="btn btn-primary" style="flex: 1; justify-content: center; height: 42px;"><i class="fa-solid fa-floppy-disk"></i> 儲存設定</button>
+                                    <button type="button" class="btn btn-secondary" onclick="testTelegramNotification()" style="justify-content: center; height: 42px; border: 1px solid rgba(59, 130, 246, 0.3); color: var(--color-blue);"><i class="fa-solid fa-paper-plane"></i> 測試發送</button>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Sub Tab: Help & Instructions -->
+                <div id="settings-sub-help" class="settings-sub-section" style="display: none;">
+                    <div style="max-width: 800px; margin: 0 auto;">
+                        <div class="glass-card watchlist-table-card" style="padding: 24px;">
+                            <div class="card-header" style="margin-bottom: 12px;">
+                                <h3><i class="fa-solid fa-circle-info" style="color: var(--color-blue); margin-right: 8px;"></i> Telegram 機器人設定說明</h3>
+                            </div>
+                            <div class="instruction-content" style="color: var(--text-secondary); font-size: 13px; line-height: 1.6; display: flex; flex-direction: column; gap: 10px; font-family: var(--font-tc);">
+                                <p style="margin: 0;"><strong>如何建立 Telegram 機器人並取得 Token？</strong></p>
+                                <ol style="margin: 0 0 0 20px; display: flex; flex-direction: column; gap: 4px; padding: 0;">
+                                    <li>在 Telegram 中搜尋官方帳號 <code style="color:var(--color-blue); background: rgba(0,0,0,0.2); padding: 2px 6px; border-radius: 4px; font-family: monospace;">@BotFather</code> 並開始對話。</li>
+                                    <li>輸入指令 <code style="color:var(--color-blue); background: rgba(0,0,0,0.2); padding: 2px 6px; border-radius: 4px; font-family: monospace;">/newbot</code>，依指示設定機器人名稱，即可取得 <strong>Bot Token</strong>。</li>
+                                </ol>
+                                <p style="margin: 0;"><strong>如何取得 Chat ID？</strong></p>
+                                <ol style="margin: 0 0 0 20px; display: flex; flex-direction: column; gap: 4px; padding: 0;">
+                                    <li>將您建立的機器人加入您的群組，或與機器人開啟個人對話。</li>
+                                    <li>在該對話中隨意發送一則訊息。</li>
+                                    <li>存取以下網址（需替換為您的 Token）：<br>
+                                    <code style="font-size:11px; word-break: break-all; color: var(--color-blue); background: rgba(0,0,0,0.2); padding: 2px 6px; border-radius: 4px; font-family: monospace; display: block; margin-top: 4px;">https://api.telegram.org/bot[YOUR_TOKEN]/getUpdates</code><br>
+                                    找到 <code style="color:var(--color-blue); font-family: monospace;">"chat":{"id":...}</code>，該數字即為 <strong>Chat ID</strong>（群組 ID 通常是負數，例如 `-10012345`）。</li>
+                                </ol>
+                                <p style="margin: 4px 0 0 0; font-size: 12px; color: var(--color-yellow); opacity: 0.95;"><i class="fa-solid fa-triangle-exclamation" style="margin-right: 4px;"></i> <strong>注意</strong>：必須先與機器人開啟對話，否則發送會失敗。</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Sub Tab: System Maintenance Settings -->
+                <div id="settings-sub-maintenance" class="settings-sub-section" style="display: none;">
+                    <div style="max-width: 600px; margin: 0 auto;">
+                        <div class="glass-card watchlist-form-card" style="padding: 24px;">
+                            <div class="card-header" style="margin-bottom: 20px;">
+                                <h3><i class="fa-solid fa-screwdriver-wrench" style="color: var(--color-blue); margin-right: 8px;"></i> 系統維運與清理設定</h3>
+                            </div>
+                            <form id="maintenance-settings-form" onsubmit="saveMaintenanceSettings(event)" class="watchlist-form">
+                                <div class="form-row" style="display: flex; flex-direction: column; gap: 16px;">
+                                    <div class="form-group" style="flex: 1; display: flex; flex-direction: column; gap: 6px;">
+                                        <label for="maintenance-retention-days" style="font-weight: 600; font-size: 13px; color: var(--text-primary);"><i class="fa-solid fa-calendar-day" style="margin-right: 4px; font-size: 11px;"></i> 歷史資料保存天數 (天)</label>
+                                        <input type="number" id="maintenance-retention-days" required min="1" max="365" placeholder="例如: 30" style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.1); background: rgba(0, 0, 0, 0.2); color: #fff; font-size: 13px;">
+                                        <span style="font-size: 11px; color: var(--text-secondary);">系統將自動刪除超過此天數的車牌截圖、全景圖與歷史辨識紀錄。</span>
+                                    </div>
+                                    <div class="form-group" style="flex: 1; display: flex; flex-direction: column; gap: 6px;">
+                                        <label for="maintenance-offline-threshold" style="font-weight: 600; font-size: 13px; color: var(--text-primary);"><i class="fa-solid fa-clock" style="margin-right: 4px; font-size: 11px;"></i> 相機斷線告警時間門檻 (分鐘)</label>
+                                        <input type="number" id="maintenance-offline-threshold" required min="1" max="60" placeholder="例如: 5" style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.1); background: rgba(0, 0, 0, 0.2); color: #fff; font-size: 13px;">
+                                        <span style="font-size: 11px; color: var(--text-secondary);">當任何攝影機斷線超過此時間，系統將自動向管理員發送 Telegram 警報。</span>
+                                    </div>
+                                </div>
+                                <div class="form-group button-group" style="display: flex; gap: 8px; margin-top: 24px;">
+                                    <button type="submit" class="btn btn-primary" style="flex: 1; justify-content: center; height: 42px;"><i class="fa-solid fa-floppy-disk"></i> 儲存維運設定</button>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- tab-about -->
+            <section id="tab-about" class="tab-section">
+                <div class="watchlist-grid" style="display: grid; grid-template-columns: 1.2fr 1fr; gap: 24px;">
+                    
+                    <!-- Left: About System & Core Features -->
+                    <div style="display: flex; flex-direction: column; gap: 24px;">
+                        <div class="glass-card" style="padding: 24px;">
+                            <div class="card-header" style="margin-bottom: 16px;">
+                                <h3><i class="fa-solid fa-microchip" style="color: var(--color-blue); margin-right: 8px;"></i> 關於 AI GATE 監控系統</h3>
+                            </div>
+                            <div style="color: var(--text-secondary); font-size: 14px; line-height: 1.6; font-family: var(--font-tc);">
+                                <p style="margin: 0 0 16px 0;">
+                                    <strong>AI GATE</strong> 智慧車牌監控與出入管理系統，整合了 YOLOv8 深度學習偵測演算法與 PaddleOCR 文字辨識管道，可在純 CPU（無 GPU/CUDA 加速）硬體環境下，實現雙向車道、無盲區的高精確度動態追蹤。
+                                </p>
+                                <p style="margin: 0;">
+                                    系統採用了影像移動偵測（Motion Detection）與高斯 Sobel 邊緣紋理分析，結合智慧排程，在提供高可靠性安全監控的同時，最大限度地節省伺服器硬體開銷。
+                                </p>
+                            </div>
+                        </div>
+
+                        <!-- Core Features list -->
+                        <div class="glass-card" style="padding: 24px;">
+                            <div class="card-header" style="margin-bottom: 20px;">
+                                <h3><i class="fa-solid fa-star" style="color: var(--color-blue); margin-right: 8px;"></i> 核心特色與技術亮點</h3>
+                            </div>
+                            <div style="display: grid; grid-template-columns: 1fr; gap: 16px; font-family: var(--font-tc);">
+                                
+                                <div style="display: flex; gap: 14px; align-items: flex-start; padding: 12px; background: rgba(255,255,255,0.02); border-radius: 8px; border: 1px solid rgba(255,255,255,0.03);">
+                                    <div style="font-size: 20px; color: var(--color-primary); padding-top: 2px;"><i class="fa-solid fa-expand"></i></div>
+                                    <div>
+                                        <h4 style="margin: 0 0 4px 0; color: var(--text-primary); font-size: 14px;">雙相機無盲區監控</h4>
+                                        <p style="margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.5;">大門與中庭雙相機感應範圍放寬至全幅，覆蓋進出校雙向所有車道（包括極左與極右車道），徹底解決摩托車與偏向行駛漏檢問題。</p>
+                                    </div>
+                                </div>
+
+                                <div style="display: flex; gap: 14px; align-items: flex-start; padding: 12px; background: rgba(255,255,255,0.02); border-radius: 8px; border: 1px solid rgba(255,255,255,0.03);">
+                                    <div style="font-size: 20px; color: var(--color-blue); padding-top: 2px;"><i class="fa-solid fa-wand-magic-sparkles"></i></div>
+                                    <div>
+                                        <h4 style="margin: 0 0 4px 0; color: var(--text-primary); font-size: 14px;">車牌影像前處理增強管道</h4>
+                                        <p style="margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.5;">對車牌小圖進行高度拉伸（cv2.INTER_CUBIC）、自適應直方圖等化（CLAHE 對比增強）與 Unsharp Mask 高斯銳化，使夜間、逆光與小型機車車牌的辨識信心度大幅提升。</p>
+                                    </div>
+                                </div>
+
+                                <div style="display: flex; gap: 14px; align-items: flex-start; padding: 12px; background: rgba(255,255,255,0.02); border-radius: 8px; border: 1px solid rgba(255,255,255,0.03);">
+                                    <div style="font-size: 20px; color: var(--color-yellow); padding-top: 2px;"><i class="fa-solid fa-clock"></i></div>
+                                    <div>
+                                        <h4 style="margin: 0 0 4px 0; color: var(--text-primary); font-size: 14px;">22/5 智慧門禁偵測排程</h4>
+                                        <p style="margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.5;">每日 05:00~22:00 自動處於監控啟動狀態，避開日間反光；22:00~翌日 05:00 啟用實際大門狀態偵測，關門時自動休眠（暫停 LPR 辨識以降低 CPU 負載），兼顧便利與節能。</p>
+                                    </div>
+                                </div>
+
+                                <div style="display: flex; gap: 14px; align-items: flex-start; padding: 12px; background: rgba(255,255,255,0.02); border-radius: 8px; border: 1px solid rgba(255,255,255,0.03);">
+                                    <div style="font-size: 20px; color: #a855f7; padding-top: 2px;"><i class="fa-solid fa-video"></i></div>
+                                    <div>
+                                        <h4 style="margin: 0 0 4px 0; color: var(--text-primary); font-size: 14px;">雙相機獨立啟用控制</h4>
+                                        <p style="margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.5;">支援大門與中庭相機獨立啟用、停用及「全部啟用/停用」批次控制，前端影格自適應分流渲染，並整合了多執行緒防卡死重連與 SQLite WAL 併發優化。</p>
+                                    </div>
+                                </div>
+
+                                <div style="display: flex; gap: 14px; align-items: flex-start; padding: 12px; background: rgba(255,255,255,0.02); border-radius: 8px; border: 1px solid rgba(255,255,255,0.03);">
+                                    <div style="font-size: 20px; color: #ec4899; padding-top: 2px;"><i class="fa-solid fa-shield-halved"></i></div>
+                                    <div>
+                                        <h4 style="margin: 0 0 4px 0; color: var(--text-primary); font-size: 14px;">HTTP Basic Auth 安全防護</h4>
+                                        <p style="margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.5;">全系統所有靜態網頁、API 介面及即時串流影像均受安全性驗證保護，使用者亦可在系統設定中隨時進行管理員帳密修改。</p>
+                                    </div>
+                                </div>
+
+                                <div style="display: flex; gap: 14px; align-items: flex-start; padding: 12px; background: rgba(255,255,255,0.02); border-radius: 8px; border: 1px solid rgba(255,255,255,0.03);">
+                                    <div style="font-size: 20px; color: #06b6d4; padding-top: 2px;"><i class="fa-solid fa-paper-plane"></i></div>
+                                    <div>
+                                        <h4 style="margin: 0 0 4px 0; color: var(--text-primary); font-size: 14px;">Telegram 警報與即時推播</h4>
+                                        <p style="margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.5;">當偵測到黑名單內追蹤車牌、或特定事件觸發時，系統會立即向您的 Telegram 群組發送即時通知，並自動附帶車牌採證小圖與完整現場大圖。</p>
+                                    </div>
+                                </div>
+
+                                <div style="display: flex; gap: 14px; align-items: flex-start; padding: 12px; background: rgba(255,255,255,0.02); border-radius: 8px; border: 1px solid rgba(255,255,255,0.03);">
+                                    <div style="font-size: 20px; color: #38bdf8; padding-top: 2px;"><i class="fa-solid fa-network-wired"></i></div>
+                                    <div>
+                                        <h4 style="margin: 0 0 4px 0; color: var(--text-primary); font-size: 14px;">標準中介流代理 (go2rtc)</h4>
+                                        <p style="margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.5;">全面導入 go2rtc (v1.9.14) 代理架構，原生支援 TCP/UDP 自動重連與 NVR 138 特殊視訊流的 FFmpeg 高效拉流，保障全天候穩定的即時串流。</p>
+                                    </div>
+                                </div>
+
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Right: System modification log (Timeline) -->
+                    <div class="glass-card" style="padding: 24px; display: flex; flex-direction: column;">
+                        <div class="card-header" style="margin-bottom: 20px;">
+                            <h3><i class="fa-solid fa-clock-rotate-left" style="color: var(--color-blue); margin-right: 8px;"></i> 系統更新與修改日誌</h3>
+                        </div>
+                        <div style="flex: 1; overflow-y: auto; max-height: 700px; padding-right: 8px; font-family: var(--font-tc);">
+                            <div class="timeline" style="position: relative; border-left: 2px solid rgba(255,255,255,0.08); padding-left: 20px; margin-left: 10px;">
+                                
+                                <!-- v3.2 -->
+                                <div style="position: relative; margin-bottom: 24px;">
+                                    <div style="position: absolute; left: -27px; top: 4px; width: 12px; height: 12px; border-radius: 50%; background: var(--color-primary); box-shadow: 0 0 8px var(--color-primary);"></div>
+                                    <span style="font-size: 11px; font-weight: bold; color: var(--color-primary); background: rgba(16,185,129,0.15); padding: 2px 8px; border-radius: 20px;">v3.2</span>
+                                    <span style="font-size: 11px; color: var(--text-secondary); margin-left: 8px;">2026-07-05 (當前版本)</span>
+                                    <h4 style="margin: 8px 0 4px 0; color: var(--text-primary); font-size: 13px;">機車偵測高靈敏度優化與全網頁抗閃爍重構</h4>
+                                    <ul style="margin: 0; padding-left: 16px; color: var(--text-secondary); font-size: 12px; line-height: 1.5; display: flex; flex-direction: column; gap: 4px;">
+                                        <li><strong>六層機車靈敏度升級</strong>：將運動偵測縮圖提高至 320x180，車道變化像素門檻下調至 3~4 像素，延遲 YOLO 觸發窗至 50 幀，每 2 幀偵測一次，並針對台灣機車牌格式導入專屬 0.40 OCR 低信心度放行，大幅降低機車漏報。</li>
+                                        <li><strong>網頁全介面抗閃爍重構</strong>：關閉 Chart.js 圖表更新動畫，側邊欄車流清單改用 DOM diffing 增量前插更新，防止全部車牌截圖重複載入閃爍。</li>
+                                        <li><strong>影像串流硬體加速與重繪隔離</strong>：為 MJPEG 容器設定隔離層與獨立 GPU 渲染層（will-change 及 contain 樣式屬性），Pulse 狀態點呼吸動畫改用純 scale 與 opacity 動畫，免除 box-shadow 重繪造成的網頁閃動。</li>
+                                    </ul>
+                                </div>
+
+                                <!-- v3.1 -->
+                                <div style="position: relative; margin-bottom: 24px;">
+                                    <div style="position: absolute; left: -27px; top: 4px; width: 12px; height: 12px; border-radius: 50%; background: var(--color-blue);"></div>
+                                    <span style="font-size: 11px; font-weight: bold; color: var(--color-blue); background: rgba(59,130,246,0.15); padding: 2px 8px; border-radius: 20px;">v3.1</span>
+                                    <span style="font-size: 11px; color: var(--text-secondary); margin-left: 8px;">2026-07-05</span>
+                                    <h4 style="margin: 8px 0 4px 0; color: var(--text-primary); font-size: 13px;">go2rtc 中介代理整合與後端 API 修正</h4>
+                                    <ul style="margin: 0; padding-left: 16px; color: var(--text-secondary); font-size: 12px; line-height: 1.5; display: flex; flex-direction: column; gap: 4px;">
+                                        <li>導入標準化 RTSP 中介代理（go2rtc），消除脆弱的本地 VLC 轉碼 subprocess，防止 VLC 進程誤殺風險。</li>
+                                        <li>針對 NVR 138 影像流不支援 TCP 傳輸之限制，自動啟用 UDP 傳輸與大 Probesize 的 FFmpeg exec 拉流代理。</li>
+                                        <li>修正後端 `/api/watchlist` POST API 缺少 CORS 與 Header 結束符號造成的網頁「新增追蹤車牌無法儲存」連線錯誤。</li>
+                                    </ul>
+                                </div>
+
+                                <!-- v3.0 -->
+                                <div style="position: relative; margin-bottom: 24px;">
+                                    <div style="position: absolute; left: -27px; top: 4px; width: 12px; height: 12px; border-radius: 50%; background: var(--color-blue);"></div>
+                                    <span style="font-size: 11px; font-weight: bold; color: var(--color-blue); background: rgba(59,130,246,0.15); padding: 2px 8px; border-radius: 20px;">v3.0</span>
+                                    <span style="font-size: 11px; color: var(--text-secondary); margin-left: 8px;">2026-07-05</span>
+                                    <h4 style="margin: 8px 0 4px 0; color: var(--text-primary); font-size: 13px;">安全隔離與維運參數設定自動化</h4>
+                                    <ul style="margin: 0; padding-left: 16px; color: var(--text-secondary); font-size: 12px; line-height: 1.5; display: flex; flex-direction: column; gap: 4px;">
+                                        <li>移除了原始碼中的明碼 RTSP 密碼，將憑證完全隔離至外部 `config.json` 檔案中。</li>
+                                        <li>新增背景清理執行緒，依據設定天數自動清理過期的車牌截圖與資料庫記錄，保護硬碟空間。</li>
+                                        <li>新增攝影機斷線警報機制，連續中斷超過設定時間即時發送 Telegram 警告，連線恢復時發送通知。</li>
+                                        <li>在系統設定中新增「維運設定」標籤頁，供管理員直接調整清理天數與斷線警報時間。</li>
+                                    </ul>
+                                </div>
+
+                                <!-- v2.9 -->
+                                <div style="position: relative; margin-bottom: 24px;">
+                                    <div style="position: absolute; left: -27px; top: 4px; width: 12px; height: 12px; border-radius: 50%; background: var(--color-blue);"></div>
+                                    <span style="font-size: 11px; font-weight: bold; color: var(--color-blue); background: rgba(59,130,246,0.15); padding: 2px 8px; border-radius: 20px;">v2.9</span>
+                                    <span style="font-size: 11px; color: var(--text-secondary); margin-left: 8px;">2026-07-05</span>
+                                    <h4 style="margin: 8px 0 4px 0; color: var(--text-primary); font-size: 13px;">系統設定頁面改版為二級子分頁</h4>
+                                    <ul style="margin: 0; padding-left: 16px; color: var(--text-secondary); font-size: 12px; line-height: 1.5; display: flex; flex-direction: column; gap: 4px;">
+                                        <li>將原本堆疊在一起的設定區塊，整理為「攝影機管理」、「網頁帳密設定」、「Telegram 推播」、「設定說明」四個標籤。</li>
+                                        <li>實作設定頁的橫向分頁導覽列（Sub-tabs），提供更清爽直覺、無需反覆滾動的設定操作體驗。</li>
+                                    </ul>
+                                </div>
+
+                                <!-- v2.8 -->
+                                <div style="position: relative; margin-bottom: 24px;">
+                                    <div style="position: absolute; left: -27px; top: 4px; width: 12px; height: 12px; border-radius: 50%; background: var(--color-blue);"></div>
+                                    <span style="font-size: 11px; font-weight: bold; color: var(--color-blue); background: rgba(59,130,246,0.15); padding: 2px 8px; border-radius: 20px;">v2.8</span>
+                                    <span style="font-size: 11px; color: var(--text-secondary); margin-left: 8px;">2026-07-05</span>
+                                    <h4 style="margin: 8px 0 4px 0; color: var(--text-primary); font-size: 13px;">門禁排程優化與門檻微調</h4>
+                                    <ul style="margin: 0; padding-left: 16px; color: var(--text-secondary); font-size: 12px; line-height: 1.5; display: flex; flex-direction: column; gap: 4px;">
+                                        <li>大門感應偵測時間區間改為 22/5 排程（05:00 ~ 22:00 自動啟動，22:00 後進行動態影像偵測與休眠）。</li>
+                                        <li>大門金屬邊緣判定門檻由 22.0 微調至更穩定的 22.5，消除白天光影偶發的誤判干擾。</li>
+                                    </ul>
+                                </div>
+
+                                <!-- v2.7 -->
+                                <div style="position: relative; margin-bottom: 24px;">
+                                    <div style="position: absolute; left: -27px; top: 4px; width: 12px; height: 12px; border-radius: 50%; background: var(--color-blue);"></div>
+                                    <span style="font-size: 11px; font-weight: bold; color: var(--color-blue); background: rgba(59,130,246,0.15); padding: 2px 8px; border-radius: 20px;">v2.7</span>
+                                    <span style="font-size: 11px; color: var(--text-secondary); margin-left: 8px;">2026-07-05</span>
+                                    <h4 style="margin: 8px 0 4px 0; color: var(--text-primary); font-size: 13px;">雙鏡頭獨立開關控制</h4>
+                                    <ul style="margin: 0; padding-left: 16px; color: var(--text-secondary); font-size: 12px; line-height: 1.5; display: flex; flex-direction: column; gap: 4px;">
+                                        <li>將原本「二選一」的套用邏輯，改為各自獨立的「啟用」與「停用」控制開關。</li>
+                                        <li>在攝影機列表右上角新增「一鍵全部啟用」與「一鍵全部停用」批次控制功能，方便管理大門與中庭相機。</li>
+                                    </ul>
+                                </div>
+
+                                <!-- v2.6 -->
+                                <div style="position: relative; margin-bottom: 24px;">
+                                    <div style="position: absolute; left: -27px; top: 4px; width: 12px; height: 12px; border-radius: 50%; background: var(--color-blue);"></div>
+                                    <span style="font-size: 11px; font-weight: bold; color: var(--color-blue); background: rgba(59,130,246,0.15); padding: 2px 8px; border-radius: 20px;">v2.6</span>
+                                    <span style="font-size: 11px; color: var(--text-secondary); margin-left: 8px;">2026-07-05</span>
+                                    <h4 style="margin: 8px 0 4px 0; color: var(--text-primary); font-size: 13px;">HTTP Basic Auth 安全認證</h4>
+                                    <ul style="margin: 0; padding-left: 16px; color: var(--text-secondary); font-size: 12px; line-height: 1.5; display: flex; flex-direction: column; gap: 4px;">
+                                        <li>後端為 `do_GET`、`do_POST` 與 `do_DELETE` 請求路徑全面加入安全驗證攔截器。</li>
+                                        <li>新增 `admin` / `3762828` 預設帳密至 SQLite 並對儲存密碼進行加密與比對驗證。</li>
+                                        <li>前端系統設定頁面新增 glassmorphism 風格的網頁登入憑證管理卡片，方便隨時在線上修改密碼。</li>
+                                    </ul>
+                                </div>
+
+                                <!-- v2.5 -->
+                                <div style="position: relative; margin-bottom: 24px;">
+                                    <div style="position: absolute; left: -27px; top: 4px; width: 12px; height: 12px; border-radius: 50%; background: rgba(255,255,255,0.2);"></div>
+                                    <span style="font-size: 11px; font-weight: bold; color: var(--text-secondary); background: rgba(255,255,255,0.08); padding: 2px 8px; border-radius: 20px;">v2.5</span>
+                                    <span style="font-size: 11px; color: var(--text-secondary); margin-left: 8px;">2026-07-02</span>
+                                    <h4 style="margin: 8px 0 4px 0; color: var(--text-primary); font-size: 13px;">多幀字元投票演算法 (防抖去重)</h4>
+                                    <ul style="margin: 0; padding-left: 16px; color: var(--text-secondary); font-size: 12px; line-height: 1.5; display: flex; flex-direction: column; gap: 4px;">
+                                        <li>引進車牌追蹤期間的「字元多位多幀投票」決策機制，修正動態車牌邊界閃爍與抖動干擾。</li>
+                                        <li>有效解決因單個錯誤幀導致的重複建檔與多餘的 Telegram 推播，大幅提升歷史通行紀錄的準確性。</li>
+                                    </ul>
+                                </div>
+
+                                <!-- v2.4 -->
+                                <div style="position: relative; margin-bottom: 24px;">
+                                    <div style="position: absolute; left: -27px; top: 4px; width: 12px; height: 12px; border-radius: 50%; background: rgba(255,255,255,0.2);"></div>
+                                    <span style="font-size: 11px; font-weight: bold; color: var(--text-secondary); background: rgba(255,255,255,0.08); padding: 2px 8px; border-radius: 20px;">v2.4</span>
+                                    <span style="font-size: 11px; color: var(--text-secondary); margin-left: 8px;">2026-06-29</span>
+                                    <h4 style="margin: 8px 0 4px 0; color: var(--text-primary); font-size: 13px;">全幅監控與防漏感應區放寬</h4>
+                                    <ul style="margin: 0; padding-left: 16px; color: var(--text-secondary); font-size: 12px; line-height: 1.5; display: flex; flex-direction: column; gap: 4px;">
+                                        <li>放寬運動偵測感應區（大門放寬為 `[7:85, 5:155]`，中庭放寬為 `[10:85, 5:155]`），且調高敏感度。</li>
+                                        <li>放寬 YOLO 推論的前置影像剪裁比例至全幅（高度 5%~95%、寬度 2%~98%），解決側邊行駛機車漏偵測。</li>
+                                    </ul>
+                                </div>
+
+                                <!-- v2.3 -->
+                                <div style="position: relative; margin-bottom: 24px;">
+                                    <div style="position: absolute; left: -27px; top: 4px; width: 12px; height: 12px; border-radius: 50%; background: rgba(255,255,255,0.2);"></div>
+                                    <span style="font-size: 11px; font-weight: bold; color: var(--text-secondary); background: rgba(255,255,255,0.08); padding: 2px 8px; border-radius: 20px;">v2.3</span>
+                                    <span style="font-size: 11px; color: var(--text-secondary); margin-left: 8px;">2026-06-26</span>
+                                    <h4 style="margin: 8px 0 4px 0; color: var(--text-primary); font-size: 13px;">車牌辨識前處理管道 (OCR 增強)</h4>
+                                    <ul style="margin: 0; padding-left: 16px; color: var(--text-secondary); font-size: 12px; line-height: 1.5; display: flex; flex-direction: column; gap: 4px;">
+                                        <li>引入雙向三次內插（Cubic）拉伸至高度 64px，結合自適應直方圖等化（CLAHE）與拉普拉斯邊緣銳化。</li>
+                                        <li>顯著提高小型車牌、夜間模糊及逆光狀態下的 OCR 辨識可信度。</li>
+                                    </ul>
+                                </div>
+
+                                <!-- v2.2 -->
+                                <div style="position: relative; margin-bottom: 24px;">
+                                    <div style="position: absolute; left: -27px; top: 4px; width: 12px; height: 12px; border-radius: 50%; background: rgba(255,255,255,0.2);"></div>
+                                    <span style="font-size: 11px; font-weight: bold; color: var(--text-secondary); background: rgba(255,255,255,0.08); padding: 2px 8px; border-radius: 20px;">v2.2</span>
+                                    <span style="font-size: 11px; color: var(--text-secondary); margin-left: 8px;">2026-06-24</span>
+                                    <h4 style="margin: 8px 0 4px 0; color: var(--text-primary); font-size: 13px;">Telegram 機器人警報整合</h4>
+                                    <ul style="margin: 0; padding-left: 16px; color: var(--text-secondary); font-size: 12px; line-height: 1.5; display: flex; flex-direction: column; gap: 4px;">
+                                        <li>實作 Telegram Bot 的通訊基礎建設，支援同步發送文字、車牌裁切圖與現場照。</li>
+                                        <li>增加前端 Telegram 設定卡片與「一鍵測試發送」測試功能。</li>
+                                    </ul>
+                                </div>
+
+                                <!-- v2.1 -->
+                                <div style="position: relative; margin-bottom: 24px;">
+                                    <div style="position: absolute; left: -27px; top: 4px; width: 12px; height: 12px; border-radius: 50%; background: rgba(255,255,255,0.2);"></div>
+                                    <span style="font-size: 11px; font-weight: bold; color: var(--text-secondary); background: rgba(255,255,255,0.08); padding: 2px 8px; border-radius: 20px;">v2.1</span>
+                                    <span style="font-size: 11px; color: var(--text-secondary); margin-left: 8px;">2026-06-23</span>
+                                    <h4 style="margin: 8px 0 4px 0; color: var(--text-primary); font-size: 13px;">資料庫併發存取優化</h4>
+                                    <ul style="margin: 0; padding-left: 16px; color: var(--text-secondary); font-size: 12px; line-height: 1.5; display: flex; flex-direction: column; gap: 4px;">
+                                        <li>SQLite 啟動 WAL (Write-Ahead Logging) 模式，以應對高併發寫入。</li>
+                                        <li>更改為 SQLite「隨開隨關」連線機制，解決多執行緒跨線程存取的 `ProgrammingError` 崩潰問題。</li>
+                                    </ul>
+                                </div>
+
+                                <!-- v2.0 -->
+                                <div style="position: relative;">
+                                    <div style="position: absolute; left: -27px; top: 4px; width: 12px; height: 12px; border-radius: 50%; background: rgba(255,255,255,0.2);"></div>
+                                    <span style="font-size: 11px; font-weight: bold; color: var(--text-secondary); background: rgba(255,255,255,0.08); padding: 2px 8px; border-radius: 20px;">v2.0</span>
+                                    <span style="font-size: 11px; color: var(--text-secondary); margin-left: 8px;">2026-06-21</span>
+                                    <h4 style="margin: 8px 0 4px 0; color: var(--text-primary); font-size: 13px;">雙鏡頭監控介面正式發表</h4>
+                                    <ul style="margin: 0; padding-left: 16px; color: var(--text-secondary); font-size: 12px; line-height: 1.5; display: flex; flex-direction: column; gap: 4px;">
+                                        <li>大門與中庭雙鏡頭畫面分流渲染。</li>
+                                        <li>實作響應式儀表板（即時動態、歷史通行表格與搜尋過濾器）。</li>
+                                    </ul>
+                                </div>
+
+                            </div>
+                        </div>
+                    </div>
+
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Full Image Modal -->
+    <div id="image-modal" class="modal hidden">
+        <span class="modal-close" onclick="closeModal()">&times;</span>
+        <div class="modal-content">
+            <div class="modal-info">
+                <span id="modal-plate" class="modal-plate-badge">ABC-1234</span>
+                <span id="modal-time" class="modal-time-label">2026-06-21 12:00:00</span>
+            </div>
+            <img id="modal-img" src="" alt="Full Frame Capture">
+        </div>
+    </div>
+
+    <!-- Edit Plate Modal -->
+    <div id="edit-modal" class="modal hidden">
+        <div class="modal-content" style="max-width: 400px; padding: 24px; background: rgba(17, 24, 39, 0.95); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 12px; box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37); backdrop-filter: blur(16px);">
+            <span class="modal-close" onclick="closeEditModal()">&times;</span>
+            <h3 style="margin-top: 0; color: #F3F4F6; font-size: 18px; font-weight: 600;"><i class="fa-solid fa-pen-to-square" style="color: var(--color-primary); margin-right: 8px;"></i> 修正車牌號碼</h3>
+            <form id="edit-plate-form" onsubmit="submitPlateCorrection(event)" style="margin-top: 16px; display: flex; flex-direction: column; gap: 16px;">
+                <input type="hidden" id="edit-det-id">
+                <div class="form-group" style="display: flex; flex-direction: column; gap: 8px;">
+                    <label for="edit-plate-input" style="color: #9CA3AF; font-size: 13px;">新車牌號碼</label>
+                    <input type="text" id="edit-plate-input" required placeholder="例如: ABC-1234" style="text-transform: uppercase; width: 100%; padding: 10px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.1); background: rgba(0, 0, 0, 0.2); color: #fff; font-size: 14px; font-weight: 600;">
+                </div>
+                <button type="submit" class="btn btn-primary" style="justify-content: center; width: 100%;"><i class="fa-solid fa-check" style="margin-right: 6px;"></i> 確認修改</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Alert Audio Element -->
+    <audio id="alert-sound" src="https://assets.mixkit.co/active_storage/sfx/2869/2869-84.wav" preload="auto"></audio>
+    
+    <!-- Real-time Alert Banner -->
+    <div id="alert-banner" class="alert-banner hidden">
+        <div class="alert-banner-content">
+            <div class="alert-banner-icon"><i class="fa-solid fa-triangle-exclamation"></i></div>
+            <div class="alert-banner-info">
+                <span class="alert-banner-title">追蹤車牌警報！</span>
+                <span id="alert-banner-text" class="alert-banner-text">黑名單車輛 TEST-1234 進入大門</span>
+            </div>
+            <button class="alert-banner-close" onclick="closeAlertBanner()">&times;</button>
+        </div>
+    </div>
+
+    <script src="app.js?v=14"></script>
+</body>
+</html>
