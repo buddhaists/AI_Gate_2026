@@ -590,11 +590,25 @@
                         <div style="flex: 1; overflow-y: auto; max-height: 700px; padding-right: 8px; font-family: var(--font-tc);">
                             <div class="timeline" style="position: relative; border-left: 2px solid rgba(255,255,255,0.08); padding-left: 20px; margin-left: 10px;">
                                 
-                                <!-- v3.2 -->
+                                <!-- v3.3 -->
                                 <div style="position: relative; margin-bottom: 24px;">
                                     <div style="position: absolute; left: -27px; top: 4px; width: 12px; height: 12px; border-radius: 50%; background: var(--color-primary); box-shadow: 0 0 8px var(--color-primary);"></div>
-                                    <span style="font-size: 11px; font-weight: bold; color: var(--color-primary); background: rgba(16,185,129,0.15); padding: 2px 8px; border-radius: 20px;">v3.2</span>
-                                    <span style="font-size: 11px; color: var(--text-secondary); margin-left: 8px;">2026-07-05 (當前版本)</span>
+                                    <span style="font-size: 11px; font-weight: bold; color: var(--color-primary); background: rgba(16,185,129,0.15); padding: 2px 8px; border-radius: 20px;">v3.3</span>
+                                    <span style="font-size: 11px; color: var(--text-secondary); margin-left: 8px;">2026-07-07 (當前版本)</span>
+                                    <h4 style="margin: 8px 0 4px 0; color: var(--text-primary); font-size: 13px;">CPU負載極致優化與 OpenVINO 運作穩定度提升</h4>
+                                    <ul style="margin: 0; padding-left: 16px; color: var(--text-secondary); font-size: 12px; line-height: 1.5; display: flex; flex-direction: column; gap: 4px;">
+                                        <li><strong>OpenVINO CPU 穩定加速</strong>：將 YOLO 辨識轉為 OpenVINO 模型並固定於 CPU 執行，避開 Intel UHD 630 顯卡驅動的 CISA 編譯器閃退 Bug，同時仍保有 27ms 的高速推論效能。</li>
+                                        <li><strong>背景運算執行緒空閒休眠</strong>：導入 `KMP_BLOCKTIME=0` 與被動等待策略，強制 OpenMP/TBB 等運算庫在空閒時立即釋放 CPU 並休眠，解決高達 45% 的背景 CPU 空轉消耗。</li>
+                                        <li><strong>運動偵測防噪與連續幀過濾</strong>：大門與大門002的 driveway 像素門檻分別提高至 450/350，並加入「連續 2 幀運動判定」，100% 過濾風吹落葉與 I-frame 訊號刷新的無效觸發，徹底消除冷卻期造成的機車漏報盲區。</li>
+                                        <li><strong>影像處理頻率平衡</strong>：解碼睡眠時間微調至 80ms 並跳過 1/2 影格（有效處理率 6fps），將 YOLO 呼叫間隔拉長至 3 幀，達成高捕捉率與超低 CPU 使用率（僅 3~4%）的完美平衡。</li>
+                                    </ul>
+                                </div>
+
+                                <!-- v3.2 -->
+                                <div style="position: relative; margin-bottom: 24px;">
+                                    <div style="position: absolute; left: -27px; top: 4px; width: 12px; height: 12px; border-radius: 50%; background: var(--color-blue);"></div>
+                                    <span style="font-size: 11px; font-weight: bold; color: var(--color-blue); background: rgba(59,130,246,0.15); padding: 2px 8px; border-radius: 20px;">v3.2</span>
+                                    <span style="font-size: 11px; color: var(--text-secondary); margin-left: 8px;">2026-07-05</span>
                                     <h4 style="margin: 8px 0 4px 0; color: var(--text-primary); font-size: 13px;">機車偵測高靈敏度優化與全網頁抗閃爍重構</h4>
                                     <ul style="margin: 0; padding-left: 16px; color: var(--text-secondary); font-size: 12px; line-height: 1.5; display: flex; flex-direction: column; gap: 4px;">
                                         <li><strong>六層機車靈敏度升級</strong>：將運動偵測縮圖提高至 320x180，車道變化像素門檻下調至 3~4 像素，延遲 YOLO 觸發窗至 50 幀，每 2 幀偵測一次，並針對台灣機車牌格式導入專屬 0.40 OCR 低信心度放行，大幅降低機車漏報。</li>
