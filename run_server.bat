@@ -4,5 +4,5 @@ echo ===================================================
 echo   AI 智慧學校大門車牌監控系統 啟動中...
 echo ===================================================
 cd /d "D:\AntiGravity\ai camera-gate"
-python lpr_engine.py
+python -u lpr_engine.py
 pause

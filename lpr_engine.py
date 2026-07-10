@@ -8,6 +8,9 @@ os.environ["OPENBLAS_NUM_THREADS"] = "1"     # OpenBLAS (paddle det/rec models)
 os.environ["PADDLE_NUM_THREADS"] = "1"       # Paddle internal thread pool
 os.environ["CPU_NUM"] = "1"                  # Paddle CPU executor threads
 os.environ["NUMEXPR_NUM_THREADS"] = "1"      # NumExpr (numpy accelerator)
+os.environ["KMP_BLOCKTIME"] = "0"            # OpenMP thread blocktime: go to sleep immediately
+os.environ["OMP_WAIT_POLICY"] = "PASSIVE"    # OpenMP wait policy: yield cores immediately
+os.environ["TBB_MAX_ALLOWED_NUM_THREADS"] = "1" # Intel TBB (OpenVINO default scheduler) max threads
 # Disable FFMPEG multi-threaded decoding globally to bypass pthread_frame.c crash
 os.environ["OPENCV_FFMPEG_THREADS"] = "1"
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp;stimeout;5000000"
@@ -426,11 +429,15 @@ class RTSPVideoReader:
                     self._handle_offline_tick()
                     break
                 
-                # With YOLO on Intel UHD 630 GPU, CPU cost of YOLO = 0.
-                # We can process every frame without skipping for better motorcycle detection.
-                # 50ms sleep = ~20 reads/sec; every frame processed = ~20 fps to motion detect.
-                # This ensures fast-passing motorcycles (1-2 sec) get 10-20+ YOLO chances.
-                time.sleep(0.05)  # Rate limit to ~20 reads/sec per camera
+                # CPU OpenVINO Mode: Skip every other frame to target ~6fps effective processing.
+                # 80ms sleep reduces raw decode rate to ~12fps per camera.
+                # This keeps CPU usage low while remaining fast enough to catch motorcycles.
+                if not hasattr(self, '_skip_counter'):
+                    self._skip_counter = 0
+                self._skip_counter += 1
+                time.sleep(0.08)  # Limit decode to ~12 reads/sec per camera
+                if self._skip_counter % 2 == 0:
+                    continue  # Process 1 in 2 frames (effective ~6fps)
                 
                 # Keep only the latest frame in the queue
                 if self.q.full():
@@ -1986,17 +1993,17 @@ def main():
     # Start Maintenance Cleanup Thread
     start_maintenance_cleanup_thread()
 
-    # Load YOLO Model with OpenVINO on Intel UHD 630 GPU
-    print(f"Loading YOLOv8 model from {MODEL_PATH} (device=intel:gpu)...")
+    # Load YOLO Model with OpenVINO on CPU
+    # (Intel GPU compiler has bugs with certain layers, causing CISA routine errors and crashes)
+    print(f"Loading YOLOv8 model from {MODEL_PATH} (device=cpu)...")
     model = YOLO(MODEL_PATH, task='detect')
-    # Force first prediction to compile model on GPU (takes ~10-20s)
+    # Force first prediction to compile model on CPU
     import numpy as np
     _dummy = np.zeros((64, 64, 3), dtype=np.uint8)
-    model(_dummy, imgsz=640, device='intel:gpu', verbose=False)
-    print("[SYSTEM] YOLO model compiled on Intel UHD 630 GPU successfully.")
+    model(_dummy, imgsz=640, device='cpu', verbose=False)
+    print("[SYSTEM] YOLO model compiled on CPU successfully.")
     
-    # OpenVINO GPU inference setup: use Intel UHD 630 iGPU to offload YOLO from CPU.
-    # This makes YOLO inference consume ~0% CPU (runs entirely on iGPU shader cores).
+    # OpenVINO CPU inference setup
     try:
         import openvino as ov
         core = ov.Core()
@@ -2004,10 +2011,7 @@ def main():
         for dev in devices:
             dev_name = core.get_property(dev, 'FULL_DEVICE_NAME')
             print(f"[SYSTEM] OpenVINO device: {dev} = {dev_name}")
-        if 'GPU' in devices:
-            print("[SYSTEM] Intel iGPU detected! YOLO will run on GPU.")
-        else:
-            print("[SYSTEM] WARNING: No GPU device found, YOLO will use CPU.")
+        print("[SYSTEM] OpenVINO initialized on CPU successfully.")
     except Exception as e:
         print(f"[SYSTEM] OpenVINO setup info: {e}")
     # Limit PyTorch threads (for any residual torch ops in ultralytics pipeline)
@@ -2068,6 +2072,9 @@ def main():
     
     # Last plate times per camera
     last_plate_times = {}
+    
+    # P-H: Consecutive motion counts per camera to filter out single-frame glitches
+    consecutive_motion_counts = {}
 
     try:
         while True:
@@ -2110,38 +2117,43 @@ def main():
                     diff = cv2.absdiff(prev_g, gray_small)
                     _, diff_thresh = cv2.threshold(diff, 8, 255, cv2.THRESH_BINARY)
                     
-                    # Pixel change thresholds at 320x180 (raw, before dilate):
-                    #   JPEG noise: 2-20px | Wind/leaf: 30-100px
-                    #   Walking person: 50-150px | Motorcycle (slow): 80-250px | Car: 300-2000px
-                    # Threshold 80/60: catches all vehicles incl. slow motorcycles at edge of frame.
-                    # Pedestrians at 50-150px will sometimes trigger, but YOLO won't find plates.
+                    # Threshold 450/350: filters out typical wind/leaves/compression noise (typically <300px), 
+                    # while motorcycles (150-400px) and cars (300-2000px) will trigger reliably.
+                    # We also check for consecutive motion frames to ignore single-frame keyframe glitches.
+                    raw_motion_detected = False
                     if cam_name == "學校大門":
                         driveway_diff_raw = diff_thresh[14:170, 10:310]
                         changed_driveway_pixels = cv2.countNonZero(driveway_diff_raw)
-                        if changed_driveway_pixels >= 80:  # restored: catches slow motorcycles
-                            driveway_motion = True
-                            has_motion = True
+                        if changed_driveway_pixels >= 450:  # raised from 160 to avoid background noise
+                            raw_motion_detected = True
                     elif cam_name == "學校大門002":
                         driveway_diff_raw = diff_thresh[20:170, 10:310]
                         changed_driveway_pixels = cv2.countNonZero(driveway_diff_raw)
-                        if changed_driveway_pixels >= 60:  # restored: catches slow motorcycles
+                        if changed_driveway_pixels >= 350:  # raised from 120 to avoid background noise
+                            raw_motion_detected = True
+                    else:
+                        changed_pixels = cv2.countNonZero(diff_thresh)
+                        if changed_pixels >= 80:
+                            raw_motion_detected = True
+                    
+                    if raw_motion_detected:
+                        consecutive_motion_counts[cam_id] = consecutive_motion_counts.get(cam_id, 0) + 1
+                        # Require 2 consecutive frames of motion to confirm actual vehicle pass
+                        if consecutive_motion_counts[cam_id] >= 2:
                             driveway_motion = True
                             has_motion = True
                     else:
-                        changed_pixels = cv2.countNonZero(diff_thresh)
-                        if changed_pixels >= 40:
-                            has_motion = True
+                        consecutive_motion_counts[cam_id] = 0
                 
                 prev_grays[cam_id] = gray_small
-
+                
                 if driveway_motion:
                     last_motion_times[cam_id] = time.time()
                     # Minimum 8 seconds between trigger resets.
-                    # School gate during busy hours has constant pedestrian motion.
                     # 8s cooldown prevents pedestrian crowd from saturating YOLO.
                     last_trigger_time = camera_save_cooldown.get(f'trigger_{cam_id}', 0.0)
-                    if lpr_trigger_frames.get(cam_id, 0) == 0 and (time.time() - last_trigger_time) >= 5.0:  # 5s cooldown (GPU handles YOLO at 0% CPU)
-                        lpr_trigger_frames[cam_id] = 40  # 40 frames at ~20fps = 2 sec window
+                    if lpr_trigger_frames.get(cam_id, 0) == 0 and (time.time() - last_trigger_time) >= 8.0:  # 8s cooldown
+                        lpr_trigger_frames[cam_id] = 30  # 30 frames at ~6fps = 5 sec window
                         camera_save_cooldown[f'trigger_{cam_id}'] = time.time()
                 elif has_motion:
                     last_motion_times[cam_id] = time.time()
@@ -2231,18 +2243,17 @@ def main():
                         last_display_update[cam_id] = time.time()
                     continue
                 
-                # Run YOLO every 2 frames during trigger window.
-                # With YOLO on Intel UHD 630 GPU, inference costs 0% CPU.
-                # At ~20fps, 25-frame window = ~1.25 sec. YOLO runs 12-13 times.
-                # A motorcycle passing in 1 sec gets 10+ YOLO attempts.
-                run_lpr = (cam_frame_count % 2 == 0)
+                # Run YOLO every 3 frames during trigger window.
+                # 30-frame window ÷ 3 = 10 YOLO runs per trigger at ~6fps = covers 5 seconds.
+                # A motorcycle passing in 1.5 seconds gets 3-4 YOLO attempts.
+                run_lpr = (cam_frame_count % 3 == 0)
                 cam_trigger_frames = lpr_trigger_frames.get(cam_id, 0)
                 if cam_trigger_frames > 0:
                     run_lpr = True
                     cam_trigger_frames -= 1
                     lpr_trigger_frames[cam_id] = cam_trigger_frames
-                    if cam_trigger_frames == 34:
-                        print(f"[SYSTEM] {cam_name} driveway motion trigger: running LPR detection (40 frames).")
+                    if cam_trigger_frames == 24:
+                        print(f"[SYSTEM] {cam_name} driveway motion trigger: running LPR detection (30 frames).")
 
                 # Pre-YOLO display update: push current frame to stream NOW, before
                 # the blocking model() call occupies CPU for ~200ms. This keeps the
