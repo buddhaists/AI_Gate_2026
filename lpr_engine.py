@@ -2117,19 +2117,19 @@ def main():
                     diff = cv2.absdiff(prev_g, gray_small)
                     _, diff_thresh = cv2.threshold(diff, 8, 255, cv2.THRESH_BINARY)
                     
-                    # Threshold 450/350: filters out typical wind/leaves/compression noise (typically <300px), 
-                    # while motorcycles (150-400px) and cars (300-2000px) will trigger reliably.
+                    # Threshold 150/120: filters out typical wind/leaves/compression noise (typically <80px), 
+                    # while motorcycles (120-400px) and cars (300-2000px) will trigger reliably.
                     # We also check for consecutive motion frames to ignore single-frame keyframe glitches.
                     raw_motion_detected = False
                     if cam_name == "學校大門":
                         driveway_diff_raw = diff_thresh[14:170, 10:310]
                         changed_driveway_pixels = cv2.countNonZero(driveway_diff_raw)
-                        if changed_driveway_pixels >= 450:  # raised from 160 to avoid background noise
+                        if changed_driveway_pixels >= 150:  # lowered from 450 to catch motorcycles
                             raw_motion_detected = True
                     elif cam_name == "學校大門002":
                         driveway_diff_raw = diff_thresh[20:170, 10:310]
                         changed_driveway_pixels = cv2.countNonZero(driveway_diff_raw)
-                        if changed_driveway_pixels >= 350:  # raised from 120 to avoid background noise
+                        if changed_driveway_pixels >= 120:  # lowered from 350 to catch motorcycles
                             raw_motion_detected = True
                     else:
                         changed_pixels = cv2.countNonZero(diff_thresh)
