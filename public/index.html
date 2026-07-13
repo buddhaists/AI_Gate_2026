@@ -40,6 +40,9 @@
                 <button class="nav-item" onclick="switchTab('settings')">
                     <i class="fa-solid fa-gear"></i> 系統網址設定
                 </button>
+                <button class="nav-item" onclick="switchTab('zones')">
+                    <i class="fa-solid fa-draw-polygon"></i> 偵測區域設定
+                </button>
                 <button class="nav-item" onclick="switchTab('about')">
                     <i class="fa-solid fa-circle-info"></i> 關於本系統
                 </button>
@@ -492,6 +495,72 @@
                             </form>
                         </div>
                     </div>
+                </div>
+            </section>
+
+            <!-- tab-zones: Interactive Gate Zone Editor -->
+            <section id="tab-zones" class="tab-section">
+                <div class="section-header" style="margin-bottom:20px;">
+                    <h3 class="section-title"><i class="fa-solid fa-draw-polygon"></i> 偵測區域設定</h3>
+                    <p style="color:var(--color-text-muted);font-size:13px;margin-top:4px;">
+                        拖曳頂點（青色圓圈）調整多邊形範圍；只有框內的車牌偵測才會觸發 LPR 辨識。
+                    </p>
+                </div>
+
+                <!-- Camera Selector + Controls -->
+                <div style="display:flex;align-items:center;gap:16px;margin-bottom:16px;flex-wrap:wrap;">
+                    <div style="display:flex;align-items:center;gap:8px;">
+                        <label style="color:var(--color-text-muted);font-size:13px;">選擇鏡頭：</label>
+                        <select id="zone-cam-select" class="form-control" style="width:auto;min-width:160px;"
+                                onchange="zoneEditorLoad(this.value)">
+                        </select>
+                    </div>
+                    <button class="btn btn-primary btn-sm" onclick="zoneEditorRefreshSnapshot()">
+                        <i class="fa-solid fa-rotate"></i> 刷新畫面
+                    </button>
+                    <button class="btn btn-sm" style="background:rgba(0,220,255,0.15);color:#00dcff;border:1px solid #00dcff;"
+                            onclick="zoneEditorReset()">
+                        <i class="fa-solid fa-undo"></i> 還原預設
+                    </button>
+                    <button class="btn btn-sm" style="background:var(--color-green);color:#0a0f1e;"
+                            onclick="zoneEditorSave()">
+                        <i class="fa-solid fa-floppy-disk"></i> 儲存區域
+                    </button>
+                    <span id="zone-save-status" style="font-size:12px;color:var(--color-green);display:none;">✅ 已儲存！立即生效。</span>
+                </div>
+
+                <!-- Canvas Zone Editor -->
+                <div class="zone-editor-wrap">
+                    <div id="zone-editor-container" class="zone-editor-container">
+                        <img id="zone-snapshot" class="zone-snapshot-img"
+                             src="" alt="Loading camera snapshot..." draggable="false">
+                        <svg id="zone-svg" class="zone-svg-overlay"
+                             viewBox="0 0 640 360"
+                             xmlns="http://www.w3.org/2000/svg">
+                            <polygon id="zone-polygon" class="zone-polygon" points=""/>
+                            <g id="zone-vertices"></g>
+                        </svg>
+                    </div>
+                    <p style="color:var(--color-text-muted);font-size:12px;margin-top:10px;text-align:center;">
+                        座標單位：全畫幅像素 (1920×1080)，框內=偵測有效區，框外=過濾
+                    </p>
+                </div>
+
+                <!-- Coordinate Display Table -->
+                <div style="margin-top:16px;">
+                    <h4 style="color:var(--color-text-muted);font-size:13px;margin-bottom:8px;">
+                        <i class="fa-solid fa-table-list"></i> 目前頂點座標（1920×1080）
+                    </h4>
+                    <table id="zone-coord-table" style="width:auto;border-collapse:collapse;font-size:13px;">
+                        <thead>
+                            <tr style="color:var(--color-text-muted);">
+                                <th style="padding:4px 16px 4px 0;">頂點</th>
+                                <th style="padding:4px 16px;">X</th>
+                                <th style="padding:4px 16px;">Y</th>
+                            </tr>
+                        </thead>
+                        <tbody id="zone-coord-tbody"></tbody>
+                    </table>
                 </div>
             </section>
 

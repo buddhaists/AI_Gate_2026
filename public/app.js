@@ -114,6 +114,8 @@ function switchTab(tabName) {
     } else if (tabName === 'settings') {
         loadSystemSettings();
         switchSettingsSubTab('camera');
+    } else if (tabName === 'zones') {
+        zoneEditorInit();
     } else {
         fetchDashboardData();
     }
@@ -1709,4 +1711,228 @@ async function saveMaintenanceSettings(event) {
         alert("儲存連線失敗，請檢查網路。");
         console.error("Save Maintenance settings error:", err);
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Zone Editor – Interactive polygon gate zone editor
+// Coordinate system: API/storage = 1920×1080 full-frame pixels
+//                    SVG viewBox  = 640×360  (same as MJPEG stream size)
+//                    scale factor = 3.0  (1920/640 = 1080/360 = 3)
+// ═══════════════════════════════════════════════════════════════════════════
+const ZONE_SCALE = 3.0;          // full-frame px per SVG px
+const ZONE_VERTEX_R = 9;         // normal vertex circle radius (SVG px)
+let zoneCurrentCamId = null;     // currently selected camera id (int)
+let zonePolygonPts   = [];       // array of {x,y} in SVG (640×360) coords
+let zoneDragIdx      = -1;       // index of vertex being dragged, or -1
+let zoneDragOffX     = 0;
+let zoneDragOffY     = 0;
+let zoneActiveCameras = [];      // [{id, name}, ...]
+let zoneSnapshotTimer = null;
+
+// ── Init: populate camera dropdown then load first camera ──────────────────
+async function zoneEditorInit() {
+    try {
+        const res = await apiFetch('/api/camera');
+        const cameras = await res.json();
+        zoneActiveCameras = cameras;
+        const sel = document.getElementById('zone-cam-select');
+        sel.innerHTML = '';
+        cameras.forEach(cam => {
+            const opt = document.createElement('option');
+            opt.value = cam.id;
+            opt.textContent = `${cam.id} – ${cam.name}`;
+            sel.appendChild(opt);
+        });
+        if (cameras.length > 0) {
+            zoneEditorLoad(cameras[0].id);
+        }
+    } catch (e) {
+        console.error('Zone editor init error:', e);
+    }
+}
+
+// ── Load snapshot + zone polygon for a given camera id ────────────────────
+async function zoneEditorLoad(camId) {
+    zoneCurrentCamId = parseInt(camId);
+    document.getElementById('zone-save-status').style.display = 'none';
+    await zoneEditorRefreshSnapshot();
+    await zoneEditorFetchPolygon(zoneCurrentCamId);
+}
+
+// ── Refresh camera snapshot image ─────────────────────────────────────────
+async function zoneEditorRefreshSnapshot() {
+    const img = document.getElementById('zone-snapshot');
+    const cam = zoneCurrentCamId || 1;
+    // Append timestamp to bust cache
+    img.src = `/api/snapshot?cam_id=${cam}&t=${Date.now()}`;
+}
+
+// ── Fetch zone polygon from API and render ─────────────────────────────────
+async function zoneEditorFetchPolygon(camId) {
+    try {
+        const res = await apiFetch('/api/zones');
+        const data = await res.json();
+        const key  = String(camId);
+        if (data[key]) {
+            // data[key] is array of [x1080, y1080]; convert to SVG coords
+            zonePolygonPts = data[key].map(([fx, fy]) => ({
+                x: fx / ZONE_SCALE,
+                y: fy / ZONE_SCALE
+            }));
+        } else {
+            // Default rectangle covering most of frame
+            zonePolygonPts = [
+                { x: 80,  y: 20  },
+                { x: 560, y: 20  },
+                { x: 560, y: 340 },
+                { x: 80,  y: 340 }
+            ];
+        }
+        zoneEditorRender();
+    } catch (e) {
+        console.error('Fetch zone error:', e);
+    }
+}
+
+// ── Render polygon + draggable vertices into the SVG ──────────────────────
+function zoneEditorRender() {
+    const polygon = document.getElementById('zone-polygon');
+    const vGroup  = document.getElementById('zone-vertices');
+
+    // Update polygon points attribute
+    polygon.setAttribute('points',
+        zonePolygonPts.map(p => `${p.x},${p.y}`).join(' ')
+    );
+
+    // Rebuild vertex circles
+    vGroup.innerHTML = '';
+    zonePolygonPts.forEach((pt, idx) => {
+        // Outer circle (hit-target + visual)
+        const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        circle.setAttribute('cx', pt.x);
+        circle.setAttribute('cy', pt.y);
+        circle.setAttribute('r',  ZONE_VERTEX_R);
+        circle.setAttribute('class', 'zone-vertex');
+        circle.setAttribute('data-idx', idx);
+        // Drag start
+        circle.addEventListener('mousedown', zoneVertexMouseDown);
+        circle.addEventListener('touchstart', zoneVertexTouchStart, { passive: false });
+        vGroup.appendChild(circle);
+
+        // Label (vertex number)
+        const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        label.setAttribute('x', pt.x);
+        label.setAttribute('y', pt.y);
+        label.setAttribute('class', 'zone-vertex-label');
+        label.textContent = idx + 1;
+        vGroup.appendChild(label);
+    });
+
+    zoneEditorUpdateTable();
+}
+
+// ── Update coordinate table below the editor ──────────────────────────────
+function zoneEditorUpdateTable() {
+    const tbody = document.getElementById('zone-coord-tbody');
+    tbody.innerHTML = '';
+    zonePolygonPts.forEach((pt, idx) => {
+        const fx = Math.round(pt.x * ZONE_SCALE);
+        const fy = Math.round(pt.y * ZONE_SCALE);
+        tbody.innerHTML += `
+            <tr>
+                <td>頂點 ${idx + 1}</td>
+                <td>${fx}</td>
+                <td>${fy}</td>
+            </tr>`;
+    });
+}
+
+// ── Mouse drag handlers ────────────────────────────────────────────────────
+function zoneVertexMouseDown(e) {
+    e.preventDefault();
+    const idx = parseInt(e.target.getAttribute('data-idx'));
+    const svgRect = document.getElementById('zone-svg').getBoundingClientRect();
+    const svgW = svgRect.width;
+    const svgH = svgRect.height;
+    // Scale from screen px to SVG viewBox coords
+    const scaleX = 640 / svgW;
+    const scaleY = 360 / svgH;
+
+    zoneDragIdx = idx;
+    e.target.classList.add('dragging');
+
+    function onMove(ev) {
+        const x = Math.max(0, Math.min(640, (ev.clientX - svgRect.left) * scaleX));
+        const y = Math.max(0, Math.min(360, (ev.clientY - svgRect.top)  * scaleY));
+        zonePolygonPts[zoneDragIdx] = { x, y };
+        zoneEditorRender();
+    }
+    function onUp() {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        document.querySelectorAll('.zone-vertex').forEach(c => c.classList.remove('dragging'));
+        zoneDragIdx = -1;
+    }
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup',   onUp);
+}
+
+// ── Touch drag handlers ────────────────────────────────────────────────────
+function zoneVertexTouchStart(e) {
+    e.preventDefault();
+    const idx = parseInt(e.target.getAttribute('data-idx'));
+    const svgRect = document.getElementById('zone-svg').getBoundingClientRect();
+    const scaleX = 640 / svgRect.width;
+    const scaleY = 360 / svgRect.height;
+    zoneDragIdx = idx;
+
+    function onMove(ev) {
+        const touch = ev.touches[0];
+        const x = Math.max(0, Math.min(640, (touch.clientX - svgRect.left) * scaleX));
+        const y = Math.max(0, Math.min(360, (touch.clientY - svgRect.top)  * scaleY));
+        zonePolygonPts[zoneDragIdx] = { x, y };
+        zoneEditorRender();
+    }
+    function onEnd() {
+        document.removeEventListener('touchmove', onMove);
+        document.removeEventListener('touchend',  onEnd);
+        zoneDragIdx = -1;
+    }
+    document.addEventListener('touchmove', onMove, { passive: false });
+    document.addEventListener('touchend',  onEnd);
+}
+
+// ── Save current polygon to backend (hot-reload, no restart needed) ────────
+async function zoneEditorSave() {
+    if (zoneCurrentCamId === null) return;
+    // Convert SVG coords back to 1920×1080 full-frame coords
+    const polygon = zonePolygonPts.map(p => [
+        Math.round(p.x * ZONE_SCALE),
+        Math.round(p.y * ZONE_SCALE)
+    ]);
+    try {
+        const res = await apiFetch('/api/zones', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ cam_id: zoneCurrentCamId, polygon })
+        });
+        const data = await res.json();
+        if (data.success) {
+            const status = document.getElementById('zone-save-status');
+            status.style.display = 'inline';
+            setTimeout(() => { status.style.display = 'none'; }, 3000);
+        } else {
+            alert('儲存失敗：' + data.error);
+        }
+    } catch (e) {
+        alert('連線失敗，請確認引擎運作中。');
+        console.error('Zone save error:', e);
+    }
+}
+
+// ── Reset current camera zone to server-stored value ──────────────────────
+async function zoneEditorReset() {
+    if (zoneCurrentCamId === null) return;
+    await zoneEditorFetchPolygon(zoneCurrentCamId);
+    document.getElementById('zone-save-status').style.display = 'none';
 }

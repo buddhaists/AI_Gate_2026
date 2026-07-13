@@ -40,6 +40,7 @@ DATA_DIR = r"D:\AntiGravity\lpr_data"
 DB_PATH = os.path.join(DATA_DIR, "lpr.db")
 CROPS_DIR = os.path.join(DATA_DIR, "crops")
 FULLS_DIR = os.path.join(DATA_DIR, "fulls")
+ZONE_CONFIG_PATH = os.path.join(DATA_DIR, "zone_config.json")
 
 # Ensure directories exist
 os.makedirs(CROPS_DIR, exist_ok=True)
@@ -50,6 +51,48 @@ os.makedirs(PUBLIC_DIR, exist_ok=True)
 latest_display_frames = {} # Key: camera_id (int), Value: JPEG bytes (compressed frame)
 frame_lock = threading.Lock()
 video_capture_lock = threading.Lock()
+
+# ── Gate Zone Polygons (module-level for HTTP handler access) ─────────────────
+# Coordinates are in full-frame pixels (1920×1080).
+# Loaded from zone_config.json on startup; updated live via POST /api/zones.
+DEFAULT_ZONE_POLYGONS = {
+    "1": [[320, 80], [1800, 80], [1800, 1000], [320, 1000]],
+    "3": [[250, 30], [1820, 30], [1820, 1050], [250, 1050]],
+    "6": [[100, 50], [1820, 50], [1820, 1000], [100, 1000]],
+}
+GATE_ZONE_POLYGONS = {}   # int cam_id -> np.array polygon
+gate_zones = {}            # int cam_id -> sv.PolygonZone
+zone_config_lock = threading.Lock()
+
+def load_zone_config():
+    """Load zone polygons from zone_config.json; return DEFAULT_ZONE_POLYGONS if missing."""
+    if os.path.exists(ZONE_CONFIG_PATH):
+        try:
+            with open(ZONE_CONFIG_PATH, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"[SYSTEM] zone_config.json load error: {e}. Using defaults.")
+    return DEFAULT_ZONE_POLYGONS.copy()
+
+def save_zone_config(zones_dict):
+    """Persist zones_dict (str cam_id -> list of [x,y]) to zone_config.json."""
+    try:
+        with open(ZONE_CONFIG_PATH, 'w', encoding='utf-8') as f:
+            json.dump(zones_dict, f, indent=2)
+    except Exception as e:
+        print(f"[SYSTEM] zone_config.json save error: {e}")
+
+def rebuild_gate_zones():
+    """Rebuild sv.PolygonZone objects from the current GATE_ZONE_POLYGONS global."""
+    global gate_zones
+    new_zones = {}
+    for cam_id, poly in GATE_ZONE_POLYGONS.items():
+        new_zones[cam_id] = sv.PolygonZone(
+            polygon=poly,
+            triggering_anchors=[sv.Position.CENTER]
+        )
+    gate_zones = new_zones
+    print(f"[SYSTEM] PolygonZone gate filters rebuilt for cameras: {list(gate_zones.keys())}")
 
 # Load Configuration from config.json
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
@@ -952,6 +995,37 @@ class LPRHTTPServerHandler(BaseHTTPRequestHandler):
                 "auto_control": manual_override is None
             }).encode('utf-8'))
 
+        # GET /api/zones – return current zone polygons (1920×1080 coords)
+        elif path == "/api/zones":
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_cors_headers()
+            self.end_headers()
+            with zone_config_lock:
+                payload = {str(cam_id): poly.tolist()
+                           for cam_id, poly in GATE_ZONE_POLYGONS.items()}
+            self.wfile.write(json.dumps(payload).encode('utf-8'))
+
+        # GET /api/snapshot?cam_id=X – latest camera frame as JPEG
+        elif path == "/api/snapshot":
+            cam_id_str = query.get('cam_id', ['1'])[0]
+            try:
+                cam_id_req = int(cam_id_str)
+            except ValueError:
+                cam_id_req = 1
+            with frame_lock:
+                frame_bytes = latest_display_frames.get(cam_id_req)
+            if frame_bytes:
+                self.send_response(200)
+                self.send_header('Content-Type', 'image/jpeg')
+                self.send_cors_headers()
+                self.end_headers()
+                self.wfile.write(frame_bytes)
+            else:
+                self.send_response(404)
+                self.send_cors_headers()
+                self.end_headers()
+
         # Telegram settings check
         elif path == "/api/settings/telegram":
             self.send_response(200)
@@ -1440,6 +1514,36 @@ class LPRHTTPServerHandler(BaseHTTPRequestHandler):
                     "gate": gate_str,
                     "auto_control": manual_override is None
                 }).encode('utf-8'))
+            except Exception as e:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_cors_headers()
+                self.end_headers()
+                self.wfile.write(json.dumps({"success": False, "error": str(e)}).encode('utf-8'))
+
+        # POST /api/zones – update zone polygon for one camera (hot-reload, no restart)
+        elif path == "/api/zones":
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length).decode('utf-8')
+            try:
+                global GATE_ZONE_POLYGONS, gate_zones
+                data = json.loads(post_data)
+                cam_id_upd = int(data['cam_id'])
+                polygon_upd = data['polygon']  # list of [x, y]
+                if len(polygon_upd) < 3:
+                    raise ValueError("Polygon must have at least 3 points")
+                with zone_config_lock:
+                    GATE_ZONE_POLYGONS[cam_id_upd] = np.array(polygon_upd)
+                    rebuild_gate_zones()
+                    # Persist all zones to file
+                    zones_serial = {str(k): v.tolist() for k, v in GATE_ZONE_POLYGONS.items()}
+                    save_zone_config(zones_serial)
+                print(f"[ZONE] Camera {cam_id_upd} zone updated: {polygon_upd}")
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_cors_headers()
+                self.end_headers()
+                self.wfile.write(json.dumps({"success": True, "cam_id": cam_id_upd}).encode('utf-8'))
             except Exception as e:
                 self.send_response(400)
                 self.send_header('Content-Type', 'application/json')
@@ -2092,27 +2196,13 @@ def main():
     plate_candidates = {}   # key: cam_id
 
     # ── Improvement 3: sv.PolygonZone gate detection zones ───────────────────
-    # Each camera has a polygon (pixel coords for 1920×1080) that covers only
-    # the vehicle driveway area.  YOLO plate detections whose CENTER falls
-    # OUTSIDE the polygon are silently discarded – eliminating false triggers
-    # from camera overlays, background trees, parked bikes off to the side, etc.
-    #
-    # Coordinates are tuned from live frame grabs (see zone_preview/ images).
-    # To adjust: modify the numpy arrays below and restart the engine.
-    GATE_ZONE_POLYGONS = {
-        1: np.array([[320, 80], [1800, 80], [1800, 1000], [320, 1000]]),   # cam1 002大門 (brick driveway)
-        3: np.array([[250, 30], [1820, 30], [1820, 1050], [250, 1050]]),   # cam3 001大門 (main gate lane)
-        6: np.array([[100, 50], [1820, 50], [1820, 1000], [100, 1000]]),   # cam6 003西南側門
-    }
-    # Build sv.PolygonZone objects (check plate bounding-box CENTER is inside zone)
-    gate_zones = {
-        cam_id: sv.PolygonZone(
-            polygon=poly,
-            triggering_anchors=[sv.Position.CENTER]
-        )
-        for cam_id, poly in GATE_ZONE_POLYGONS.items()
-    }
-    print(f"[SYSTEM] PolygonZone gate filters loaded for cameras: {list(gate_zones.keys())}")
+    # Loaded from zone_config.json (or DEFAULT_ZONE_POLYGONS if first run).
+    # Updated live via POST /api/zones without restarting the engine.
+    global GATE_ZONE_POLYGONS, gate_zones
+    zone_data = load_zone_config()
+    GATE_ZONE_POLYGONS = {int(k): np.array(v) for k, v in zone_data.items()}
+    rebuild_gate_zones()
+
 
     # Last motion times per camera
     last_motion_times = {}

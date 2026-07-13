@@ -1227,3 +1227,71 @@ body {
     font-size: 11px;
 }
 
+/* ── Zone Editor ─────────────────────────────────────────────────────────── */
+.zone-editor-wrap {
+    background: rgba(0,0,0,0.35);
+    border: 1px solid rgba(0, 220, 255, 0.25);
+    border-radius: 12px;
+    padding: 16px;
+    display: inline-block;
+    max-width: 100%;
+}
+.zone-editor-container {
+    position: relative;
+    display: inline-block;
+    line-height: 0;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 0 24px rgba(0, 220, 255, 0.12);
+}
+.zone-snapshot-img {
+    display: block;
+    width: 960px;
+    max-width: 100%;
+    height: auto;
+    border-radius: 8px;
+}
+.zone-svg-overlay {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    overflow: visible;
+}
+.zone-polygon {
+    fill: rgba(0, 220, 255, 0.12);
+    stroke: #00dcff;
+    stroke-width: 2.5;
+    stroke-linejoin: round;
+    stroke-dasharray: none;
+    transition: fill 0.2s;
+}
+.zone-polygon:hover { fill: rgba(0, 220, 255, 0.2); }
+.zone-vertex {
+    fill: #00dcff;
+    stroke: #fff;
+    stroke-width: 2;
+    cursor: grab;
+    transition: r 0.15s, fill 0.15s;
+    filter: drop-shadow(0 0 4px #00dcff);
+}
+.zone-vertex:hover, .zone-vertex.dragging {
+    fill: #fff;
+    r: 11;
+    cursor: grabbing;
+}
+.zone-vertex-label {
+    fill: #fff;
+    font-size: 11px;
+    font-family: 'IBM Plex Mono', monospace;
+    pointer-events: none;
+    text-anchor: middle;
+    dominant-baseline: central;
+}
+#zone-coord-tbody tr td {
+    padding: 3px 16px 3px 0;
+    color: var(--color-text-primary);
+}
+#zone-coord-tbody tr:nth-child(odd) td {
+    color: #00dcff;
+}
+
