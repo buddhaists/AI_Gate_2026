@@ -10,7 +10,10 @@
 * **AI 辨識引擎**：
   * **YOLOv8-LPR**：進行即時車牌定位（經 OpenVINO CPU 向量加速，單次推論僅需 27ms）。
   * **PaddleOCRv6**：對車牌影像進行精準文字辨識。
-* **前端介面**：採用現代 Glassmorphism (毛玻璃) 風格網頁儀表板，支援 RWD 響應式佈局（電腦、平板、手機皆可流暢瀏覽），並具備抗閃爍增量更新技術。
+* **動態追蹤與過濾**：
+  * **Supervision ByteTrack**：採用 Kalman 濾波算法對車牌偵測框進行連續格訊號追蹤，取代傳統 IoU 去重，大幅提升移動中車輛與多車並行時的辨識精準度與防重複儲存能力。
+  * **Supervision PolygonZone**：閘門偵測區多邊形過濾，保證僅在指定的車道/大門區內進行車牌辨識，完全過濾框外的背景車流。
+* **前端介面**：採用現代 Glassmorphism (毛玻璃) 風格網頁儀表板，支援 RWD 響應式佈局（電腦、平板、手機皆可流暢瀏覽），並具備網頁端多邊形區域編輯器，免重啟熱更新。
 
 ---
 
@@ -47,10 +50,11 @@ ai camera-gate/
 ├── run_server.bat          # 一鍵啟動批次檔
 ├── requirements.txt        # Python 依賴清單
 ├── ffmpeg.exe              # (⚠️ 外部二進位) 影像解碼執行檔
-└── go2rtc.exe              # (⚠️ 外部二進位) RTSP 串流代理執行檔
+├── go2rtc.exe              # (⚠️ 外部二進位) RTSP 串流代理執行檔
+└── go2rtc.yaml             # RTSP 代理設定檔
 ```
 > [!IMPORTANT]
-> `ffmpeg.exe` (約 136MB) 與 `go2rtc.exe` (約 19MB) 因檔案過大未上傳至 GitHub，請務必直接從您的 **本地備份資料夾** (`AI智慧大門_網站備份025`) 複製這兩個檔案到新電腦的專案根目錄。
+> `ffmpeg.exe` (約 136MB) 與 `go2rtc.exe` (約 19MB) 因檔案過大未上傳至 GitHub，請務必直接從您的 **本地備份資料夾** (`智慧大門_網頁備份026.zip`) 複製這兩個檔案到新電腦的專案根目錄。
 
 ### 🔹 第三步：安裝 Python 依賴庫
 開啟 CMD 視窗，切換至專案根目錄，並執行一鍵安裝指令：
@@ -110,9 +114,10 @@ streams:
 當 CMD 視窗顯示以下日誌時，代表啟動成功：
 1. `Using OpenVINO LATENCY mode for batch=1 inference on (CPU)...` (OpenVINO CPU 加速啟動)
 2. `[SYSTEM] OpenVINO initialized on CPU successfully.`
-3. `AI LPR Engine started successfully. Monitoring stream...` (監控主引擎上線)
-4. `Web Dashboard Server running at http://localhost:8081` (網頁伺服器開啟)
-5. `RTSP proxy connection established.` (影像串流連線成功)
+3. `[SYSTEM] ByteTrack initialized for camera X...` (ByteTrack 模組啟動)
+4. `AI LPR Engine started successfully. Monitoring stream...` (監控主引擎上線)
+5. `Web Dashboard Server running at http://localhost:8081` (網頁伺服器開啟)
+6. `RTSP proxy connection established.` (影像串流連線成功)
 
 ---
 
@@ -135,7 +140,10 @@ streams:
 2. **歷史紀錄查詢 (History)**：
    - 可依據「車牌號碼」進行模糊查詢（如輸入 `BDP` 即可查出 `BDP3832` 等車輛）。
    - 顯示所有通過時間、相機來源，並提供辨識時的車牌大圖下載。
-3. **系統維運設定 (Settings)**：
+3. **偵測區域設定 (Detection Zones)**：
+   - 可選擇不同相機，拖曳畫面上的青色多邊形圓點，微調 `sv.PolygonZone` 閘門偵測區。
+   - 按下「儲存區域」後，全新座標將立即寫入後端 `D:\AntiGravity\lpr_data\zone_config.json` 並即時熱更新生效，無須重啟引擎。
+4. **系統維運設定 (Settings)**：
    - **攝影機管理**：新增/刪除/修改相機 RTSP 串流網址。
    - **網頁帳密設定**：線上即時修改網頁密碼。
    - **Telegram 推播**：可開啟/關閉通知，或修改通知 Token。
@@ -151,9 +159,7 @@ streams:
 * `TBB_MAX_ALLOWED_NUM_THREADS=1`：限制背景執行緒池，避免多執行緒競爭造成 CPU 飆高。
 * 若在新電腦上發現 CPU 負載有異常，請確認上述環境變數是否有正常被讀取。
 
-### 🍂 運動偵測靈敏度與防噪調校
-若新電腦的攝影機畫面中，有風吹草動、落葉或劇烈光影變化導致頻繁產生無效觸發（日誌頻繁顯示 `running LPR detection`）：
-1. 用文字編輯器開啟 `lpr_engine.py`。
-2. 搜尋並前往第 2110 行的 `driveway_motion` 判斷區塊。
-3. 將 `changed_driveway_pixels` 的門檻值調高（例如：`學校大門` 調高至 `150`，`學校大門002` 調高至 `120`），直到雜訊不再觸發。
-4. 當真正的機車/車輛經過時（車體大，會造成 1000px 以上的巨大變化），系統仍會連續 2 幀偵測到並立刻觸發辨識。
+### 🍂 運動偵測與閘門區域過濾調校
+新版系統結合了「運動偵測」與「多邊形偵測區域過濾」：
+1. **過濾無效移動**：若攝影機拍攝範圍較大，包含路樹晃動、校外道路車流等。請在「偵測區域設定」面板中，將多邊形範圍限縮在大門口區域。
+2. **只保留框內觸發**：當校外道路有車通過時，雖然會觸發運動偵測，但因為偵測框位於 `PolygonZone` 遮罩之外，系統會自動在日誌中顯示 `[ZONE] 00X大門: X/X detections rejected (outside gate zone)` 並將其捨棄，不調用 LPR 辨識，從根本上杜絕外部無效警報，並釋放 CPU 運算資源。
