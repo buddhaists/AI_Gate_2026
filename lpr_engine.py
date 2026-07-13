@@ -32,6 +32,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import TCPServer
 from ultralytics import YOLO
 from paddleocr import PaddleOCR
+import supervision as sv  # Roboflow Supervision: PolygonZone gate filtering
 
 # Configure Paths
 PUBLIC_DIR = r"D:\AntiGravity\ai camera-gate\public"
@@ -2090,6 +2091,29 @@ def main():
     # ]
     plate_candidates = {}   # key: cam_id
 
+    # ── Improvement 3: sv.PolygonZone gate detection zones ───────────────────
+    # Each camera has a polygon (pixel coords for 1920×1080) that covers only
+    # the vehicle driveway area.  YOLO plate detections whose CENTER falls
+    # OUTSIDE the polygon are silently discarded – eliminating false triggers
+    # from camera overlays, background trees, parked bikes off to the side, etc.
+    #
+    # Coordinates are tuned from live frame grabs (see zone_preview/ images).
+    # To adjust: modify the numpy arrays below and restart the engine.
+    GATE_ZONE_POLYGONS = {
+        1: np.array([[320, 80], [1800, 80], [1800, 1000], [320, 1000]]),   # cam1 002大門 (brick driveway)
+        3: np.array([[250, 30], [1820, 30], [1820, 1050], [250, 1050]]),   # cam3 001大門 (main gate lane)
+        6: np.array([[100, 50], [1820, 50], [1820, 1000], [100, 1000]]),   # cam6 003西南側門
+    }
+    # Build sv.PolygonZone objects (check plate bounding-box CENTER is inside zone)
+    gate_zones = {
+        cam_id: sv.PolygonZone(
+            polygon=poly,
+            triggering_anchors=[sv.Position.CENTER]
+        )
+        for cam_id, poly in GATE_ZONE_POLYGONS.items()
+    }
+    print(f"[SYSTEM] PolygonZone gate filters loaded for cameras: {list(gate_zones.keys())}")
+
     # Last motion times per camera
     last_motion_times = {}
 
@@ -2333,140 +2357,169 @@ def main():
                     tracked_vehicles[cam_id] = [v for v in tracked_vehicles[cam_id] if current_time - v["last_seen"] < STATIONARY_TIMEOUT]
                     recently_logged_plates[cam_id] = {k: v for k, v in recently_logged_plates[cam_id].items() if current_time - v < LOGGED_SUPPRESSION_TIMEOUT}
 
+                    # ── Draw gate zone polygon on display frame ───────────────
+                    zone_poly = GATE_ZONE_POLYGONS.get(cam_id)
+                    if zone_poly is not None:
+                        cv2.polylines(display_frame, [zone_poly], True, (0, 220, 255), 2)
+                        cv2.putText(display_frame, "ZONE", (int(zone_poly[0][0]) + 6, int(zone_poly[0][1]) + 22),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 220, 255), 2)
+
+                    # ── Build supervision Detections for zone filtering ────────
+                    sv_detections_list = []
                     for result in results:
-                        boxes = result.boxes
-                        for box in boxes:
-                            xyxy = box.xyxy[0].cpu().numpy()
-                            # Map coordinates back to original full frame coordinates
-                            x1 = int(xyxy[0]) + crop_x1
-                            y1 = int(xyxy[1]) + crop_y1
-                            x2 = int(xyxy[2]) + crop_x1
-                            y2 = int(xyxy[3]) + crop_y1
+                        if len(result.boxes) > 0:
+                            det = sv.Detections.from_ultralytics(result)
+                            # Shift coordinates from cropped-frame space → full-frame space
+                            det.xyxy[:, [0, 2]] += crop_x1
+                            det.xyxy[:, [1, 3]] += crop_y1
+                            sv_detections_list.append(det)
+
+                    if sv_detections_list:
+                        all_detections = sv.Detections.merge(sv_detections_list)
+                    else:
+                        all_detections = sv.Detections.empty()
+
+                    # Apply PolygonZone filter: keep only detections inside gate zone
+                    gate_zone = gate_zones.get(cam_id)
+                    if gate_zone is not None and len(all_detections) > 0:
+                        zone_mask = gate_zone.trigger(detections=all_detections)
+                        filtered_detections = all_detections[zone_mask]
+                        n_total   = len(all_detections)
+                        n_in_zone = len(filtered_detections)
+                        if n_total > n_in_zone:
+                            print(f"[ZONE] {cam_name}: {n_total - n_in_zone}/{n_total} detections rejected (outside gate zone)")
+                    else:
+                        filtered_detections = all_detections
+
+                    # ── Iterate over zone-filtered plate detections ───────────
+                    for det_idx in range(len(filtered_detections)):
+                        xyxy = filtered_detections.xyxy[det_idx]
+                        x1, y1, x2, y2 = int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3])
+
+                        # Keep the legacy top-left corner filter as backup
+                        # (camera name overlay area – already outside zone polygon for most cameras)
+                        if x1 < 400 and y1 < 80:
+                            continue
+
+                        confidence = float(filtered_detections.confidence[det_idx])
+
+                        cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
+
+                        h, w, _ = frame.shape
+                        pad_x = int((x2 - x1) * 0.15)
+                        pad_y = int((y2 - y1) * 0.15)
+                        px1 = max(0, x1 - pad_x)
+                        py1 = max(0, y1 - pad_y)
+                        px2 = min(w, x2 + pad_x)
+                        py2 = min(h, y2 + pad_y)
+
+                        cropped_plate = frame[py1:py2, px1:px2]
+                        if cropped_plate.size == 0:
+                            continue
+
+                        crop_h, crop_w, _ = cropped_plate.shape
+                        # Relaxed minimum plate size from 40x15 to 25x10 to capture small/distant motorcycle plates
+                        if crop_w < 25 or crop_h < 10:
+                            continue
+
+                        cropped_plate_padded = cv2.copyMakeBorder(
+                            cropped_plate,
+                            top=10, bottom=10, left=15, right=15,
+                            borderType=cv2.BORDER_REPLICATE
+                        )
+
+                        # Apply Image Enhancements for OCR accuracy:
+                        # A. Resize to a uniform height of 64px (maintaining aspect ratio)
+                        target_h = 64
+                        ph, pw, _ = cropped_plate_padded.shape
+                        target_w = int(pw * (target_h / ph))
+                        enhanced = cv2.resize(cropped_plate_padded, (target_w, target_h), interpolation=cv2.INTER_CUBIC)
+                        
+                        # B. Local Contrast Enhancement using CLAHE on Luminance channel
+                        try:
+                            ycrcb = cv2.cvtColor(enhanced, cv2.COLOR_BGR2YCrCb)
+                            y_channel, cr, cb = cv2.split(ycrcb)
+                            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                            y_channel = clahe.apply(y_channel)
+                            ycrcb = cv2.merge([y_channel, cr, cb])
+                            enhanced = cv2.cvtColor(ycrcb, cv2.COLOR_YCrCb2BGR)
+                        except Exception as e:
+                            print(f"[SYSTEM] CLAHE enhancement failed: {e}")
                             
-                            # Skip detections in the top-left corner to ignore static camera name/location overlays
-                            # Relaxed to x1<400 (was 650) to allow motorcycles in left portion of frame
-                            if x1 < 400 and y1 < 80:
-                                continue
+                        # C. Sharpening using Unsharp Mask (Gaussian Blur subtraction)
+                        try:
+                            blurred = cv2.GaussianBlur(enhanced, (3, 3), 0)
+                            enhanced = cv2.addWeighted(enhanced, 1.5, blurred, -0.5, 0)
+                        except Exception as e:
+                            print(f"[SYSTEM] Sharpening failed: {e}")
 
-                            confidence = float(box.conf[0].cpu().numpy())
-
-                            cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
-
-                            h, w, _ = frame.shape
-                            pad_x = int((x2 - x1) * 0.15)
-                            pad_y = int((y2 - y1) * 0.15)
-                            px1 = max(0, x1 - pad_x)
-                            py1 = max(0, y1 - pad_y)
-                            px2 = min(w, x2 + pad_x)
-                            py2 = min(h, y2 + pad_y)
-
-                            cropped_plate = frame[py1:py2, px1:px2]
-                            if cropped_plate.size == 0:
-                                continue
-
-                            crop_h, crop_w, _ = cropped_plate.shape
-                            # Relaxed minimum plate size from 40x15 to 25x10 to capture small/distant motorcycle plates
-                            if crop_w < 25 or crop_h < 10:
-                                continue
-
-                            cropped_plate_padded = cv2.copyMakeBorder(
-                                cropped_plate,
-                                top=10, bottom=10, left=15, right=15,
-                                borderType=cv2.BORDER_REPLICATE
-                            )
-
-                            # Apply Image Enhancements for OCR accuracy:
-                            # A. Resize to a uniform height of 64px (maintaining aspect ratio)
-                            target_h = 64
-                            ph, pw, _ = cropped_plate_padded.shape
-                            target_w = int(pw * (target_h / ph))
-                            enhanced = cv2.resize(cropped_plate_padded, (target_w, target_h), interpolation=cv2.INTER_CUBIC)
+                        ocr_res = ocr.ocr(enhanced)
+                        plate_text = ""
+                        ocr_conf = 0.0
+                        
+                        if ocr_res and len(ocr_res) > 0:
+                            res_dict = ocr_res[0]
+                            texts = res_dict.get('rec_texts', [])
+                            scores = res_dict.get('rec_scores', [])
+                            plate_text = "".join(texts)
+                            ocr_conf = max(scores) if scores else 0.0
+                        cleaned_plate = clean_plate_text(plate_text)
+                        
+                        # Adaptive OCR confidence thresholds:
+                        # - Plates matching TW motorcycle format (short, mixed) get a very low threshold (0.40)
+                        # - Plates matching TW car format get a moderate threshold (0.50)
+                        # - Other plates require high confidence (0.65) to prevent garbage
+                        is_valid_format = False
+                        is_motorcycle_format = False
+                        if len(cleaned_plate) >= 4 and len(cleaned_plate) <= 10:
+                            letters_count = sum(c.isalpha() for c in cleaned_plate)
+                            digits_count = sum(c.isdigit() for c in cleaned_plate)
+                            # Motorcycle: 3L+3D or 3D+3L (6-char) or 2L+4D / 3L+4D / special EM prefix (7-char)
+                            if len(cleaned_plate) == 6 and letters_count == 3 and digits_count == 3:
+                                is_motorcycle_format = True
+                                is_valid_format = True
+                            elif len(cleaned_plate) == 7 and letters_count == 3 and digits_count == 4:
+                                is_motorcycle_format = True
+                                is_valid_format = True
+                            elif 5 <= len(cleaned_plate) <= 7 and letters_count >= 2 and digits_count >= 3:
+                                is_valid_format = True
                             
-                            # B. Local Contrast Enhancement using CLAHE on Luminance channel
-                            try:
-                                ycrcb = cv2.cvtColor(enhanced, cv2.COLOR_BGR2YCrCb)
-                                y_channel, cr, cb = cv2.split(ycrcb)
-                                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-                                y_channel = clahe.apply(y_channel)
-                                ycrcb = cv2.merge([y_channel, cr, cb])
-                                enhanced = cv2.cvtColor(ycrcb, cv2.COLOR_YCrCb2BGR)
-                            except Exception as e:
-                                print(f"[SYSTEM] CLAHE enhancement failed: {e}")
-                                
-                            # C. Sharpening using Unsharp Mask (Gaussian Blur subtraction)
-                            try:
-                                blurred = cv2.GaussianBlur(enhanced, (3, 3), 0)
-                                enhanced = cv2.addWeighted(enhanced, 1.5, blurred, -0.5, 0)
-                            except Exception as e:
-                                print(f"[SYSTEM] Sharpening failed: {e}")
+                        if is_motorcycle_format:
+                            min_ocr_conf = 0.40  # Very permissive for confirmed motorcycle plate format
+                        elif is_valid_format:
+                            min_ocr_conf = 0.50  # Permissive for valid TW plate format
+                        else:
+                            min_ocr_conf = 0.65  # High confidence required for unclear formats
+                        
+                        if len(cleaned_plate) >= 4 and len(cleaned_plate) <= 10:
+                            if ocr_conf < min_ocr_conf:
+                                print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] Detected plate {cleaned_plate} on {cam_name} but rejected due to low confidence {round(ocr_conf, 2)} (required >= {min_ocr_conf})")
 
-                            ocr_res = ocr.ocr(enhanced)
-                            plate_text = ""
-                            ocr_conf = 0.0
-                            
-                            if ocr_res and len(ocr_res) > 0:
-                                res_dict = ocr_res[0]
-                                texts = res_dict.get('rec_texts', [])
-                                scores = res_dict.get('rec_scores', [])
-                                plate_text = "".join(texts)
-                                ocr_conf = max(scores) if scores else 0.0
-                            cleaned_plate = clean_plate_text(plate_text)
-                            
-                            # Adaptive OCR confidence thresholds:
-                            # - Plates matching TW motorcycle format (short, mixed) get a very low threshold (0.40)
-                            # - Plates matching TW car format get a moderate threshold (0.50)
-                            # - Other plates require high confidence (0.65) to prevent garbage
-                            is_valid_format = False
-                            is_motorcycle_format = False
-                            if len(cleaned_plate) >= 4 and len(cleaned_plate) <= 10:
-                                letters_count = sum(c.isalpha() for c in cleaned_plate)
-                                digits_count = sum(c.isdigit() for c in cleaned_plate)
-                                # Motorcycle: 3L+3D or 3D+3L (6-char) or 2L+4D / 3L+4D / special EM prefix (7-char)
-                                if len(cleaned_plate) == 6 and letters_count == 3 and digits_count == 3:
-                                    is_motorcycle_format = True
-                                    is_valid_format = True
-                                elif len(cleaned_plate) == 7 and letters_count == 3 and digits_count == 4:
-                                    is_motorcycle_format = True
-                                    is_valid_format = True
-                                elif 5 <= len(cleaned_plate) <= 7 and letters_count >= 2 and digits_count >= 3:
-                                    is_valid_format = True
-                                
-                            if is_motorcycle_format:
-                                min_ocr_conf = 0.40  # Very permissive for confirmed motorcycle plate format
-                            elif is_valid_format:
-                                min_ocr_conf = 0.50  # Permissive for valid TW plate format
-                            else:
-                                min_ocr_conf = 0.65  # High confidence required for unclear formats
-                            
-                            if len(cleaned_plate) >= 4 and len(cleaned_plate) <= 10:
-                                if ocr_conf < min_ocr_conf:
-                                    print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] Detected plate {cleaned_plate} on {cam_name} but rejected due to low confidence {round(ocr_conf, 2)} (required >= {min_ocr_conf})")
+                        # ── Improvement 1: accumulate candidate instead of immediate save ──
+                        # Only plates passing the OCR confidence gate are eligible.
+                        if len(cleaned_plate) >= 4 and len(cleaned_plate) <= 10 and ocr_conf >= min_ocr_conf:
+                            cv2.putText(display_frame, cleaned_plate, (x1, y1 - 10),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
 
-                            # ── Improvement 1: accumulate candidate instead of immediate save ──
-                            # Only plates passing the OCR confidence gate are eligible.
-                            if len(cleaned_plate) >= 4 and len(cleaned_plate) <= 10 and ocr_conf >= min_ocr_conf:
-                                cv2.putText(display_frame, cleaned_plate, (x1, y1 - 10),
-                                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+                            combined_conf = round(confidence + ocr_conf, 4)  # YOLO conf + OCR conf
+                            timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 
-                                combined_conf = round(confidence + ocr_conf, 4)  # YOLO conf + OCR conf
-                                timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                            if cam_id not in plate_candidates:
+                                plate_candidates[cam_id] = []
 
-                                if cam_id not in plate_candidates:
-                                    plate_candidates[cam_id] = []
-
-                                plate_candidates[cam_id].append({
-                                    "plate":         cleaned_plate,
-                                    "yolo_conf":     confidence,
-                                    "ocr_conf":      ocr_conf,
-                                    "combined":      combined_conf,
-                                    "cropped_plate": cropped_plate.copy(),
-                                    "full_frame":    frame.copy(),
-                                    "box":           [x1, y1, x2, y2],
-                                    "timestamp_str": timestamp_str,
-                                })
-                                print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [CANDIDATE] {cam_name}: {cleaned_plate} "
-                                      f"(YOLO={confidence:.2f} OCR={ocr_conf:.2f} combined={combined_conf:.2f}) "
-                                      f"[{len(plate_candidates[cam_id])} buffered]")
+                            plate_candidates[cam_id].append({
+                                "plate":         cleaned_plate,
+                                "yolo_conf":     confidence,
+                                "ocr_conf":      ocr_conf,
+                                "combined":      combined_conf,
+                                "cropped_plate": cropped_plate.copy(),
+                                "full_frame":    frame.copy(),
+                                "box":           [x1, y1, x2, y2],
+                                "timestamp_str": timestamp_str,
+                            })
+                            print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [CANDIDATE] {cam_name}: {cleaned_plate} "
+                                  f"(YOLO={confidence:.2f} OCR={ocr_conf:.2f} combined={combined_conf:.2f}) "
+                                  f"[{len(plate_candidates[cam_id])} buffered]")
 
                 # ── Commit best plate when trigger window closes ──────────────
                 if trigger_window_closing:
