@@ -2263,6 +2263,16 @@ def main():
                         cv2.putText(display_frame, "GATE OPEN (>50%)", (610, 30), 
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
+                # ── Always draw gate zone polygon on every display frame ────────────
+                # Drawn here (before any 'continue') so it appears in ALL display
+                # states: idle, motion, LPR trigger, and paused.
+                zone_poly_draw = GATE_ZONE_POLYGONS.get(cam_id)
+                if zone_poly_draw is not None:
+                    cv2.polylines(display_frame, [zone_poly_draw], True, (0, 220, 255), 2)
+                    cv2.putText(display_frame, "ZONE",
+                                (int(zone_poly_draw[0][0]) + 6, int(zone_poly_draw[0][1]) + 26),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 220, 255), 2)
+
                 # Check if LPR is paused for this specific camera
                 camera_lpr_active = True
                 if manual_override == 'paused':
@@ -2356,13 +2366,6 @@ def main():
 
                     tracked_vehicles[cam_id] = [v for v in tracked_vehicles[cam_id] if current_time - v["last_seen"] < STATIONARY_TIMEOUT]
                     recently_logged_plates[cam_id] = {k: v for k, v in recently_logged_plates[cam_id].items() if current_time - v < LOGGED_SUPPRESSION_TIMEOUT}
-
-                    # ── Draw gate zone polygon on display frame ───────────────
-                    zone_poly = GATE_ZONE_POLYGONS.get(cam_id)
-                    if zone_poly is not None:
-                        cv2.polylines(display_frame, [zone_poly], True, (0, 220, 255), 2)
-                        cv2.putText(display_frame, "ZONE", (int(zone_poly[0][0]) + 6, int(zone_poly[0][1]) + 22),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 220, 255), 2)
 
                     # ── Build supervision Detections for zone filtering ────────
                     sv_detections_list = []
