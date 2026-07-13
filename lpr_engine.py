@@ -2147,10 +2147,16 @@ def main():
     server_thread = threading.Thread(target=run_web_server, daemon=True)
     server_thread.start()
 
-    # Track active vehicles in the scene per camera
+    # ── Improvement 4: sv.ByteTrack per-camera vehicle tracker ──────────────
+    # Replaces the manual IoU-based tracked_vehicles list.
+    # ByteTrack assigns a persistent tracker_id to each plate detection across
+    # frames using Kalman filtering + IoU, giving more robust identity across
+    # the 30-frame trigger window even when the vehicle is moving.
+    byte_trackers = {}   # cam_id -> sv.ByteTrack instance
+    tracked_by_id = {}   # cam_id -> {tracker_id(int): vehicle_record_dict}
+    TRACK_LOST_SECONDS = 300.0   # Keep record for 5 min (same as old STATIONARY_TIMEOUT)
+    # Legacy tracked_vehicles kept as empty dict so any stray references don't crash
     tracked_vehicles = {}
-    IOU_THRESHOLD = 0.60
-    STATIONARY_TIMEOUT = 300.0  # Keep stationary/parked vehicles in track list for 5 minutes
 
     # Display frame throttle: limit MJPEG display updates to 10fps per camera
     # This prevents YOLO runs (200ms) from causing display gaps/stutter
@@ -2484,9 +2490,25 @@ def main():
                     else:
                         filtered_detections = all_detections
 
-                    # ── Iterate over zone-filtered plate detections ───────────
-                    for det_idx in range(len(filtered_detections)):
-                        xyxy = filtered_detections.xyxy[det_idx]
+                    # ── Improvement 4: sv.ByteTrack – assign persistent tracker_id ──
+                    # Each plate detection gets a stable ID across the 30-frame trigger
+                    # window, enabling per-vehicle candidate grouping at window close.
+                    if cam_id not in byte_trackers:
+                        byte_trackers[cam_id] = sv.ByteTrack(
+                            track_activation_threshold=0.15,  # same as YOLO conf threshold
+                            lost_track_buffer=90,             # ~30s at 3fps YOLO cadence
+                            minimum_matching_threshold=0.5,
+                            frame_rate=3,
+                        )
+                        print(f"[SYSTEM] ByteTrack initialized for camera {cam_id} ({cam_name})")
+                    if len(filtered_detections) > 0:
+                        tracked_dets = byte_trackers[cam_id].update_with_detections(filtered_detections)
+                    else:
+                        tracked_dets = sv.Detections.empty()
+
+                    # ── Iterate over ByteTrack-labelled plate detections ──────────
+                    for det_idx in range(len(tracked_dets)):
+                        xyxy = tracked_dets.xyxy[det_idx]
                         x1, y1, x2, y2 = int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3])
 
                         # Keep the legacy top-left corner filter as backup
@@ -2494,7 +2516,11 @@ def main():
                         if x1 < 400 and y1 < 80:
                             continue
 
-                        confidence = float(filtered_detections.confidence[det_idx])
+                        # Extract ByteTrack tracker_id (-1 if not available)
+                        tracker_id = int(tracked_dets.tracker_id[det_idx]) \
+                            if tracked_dets.tracker_id is not None else -1
+
+                        confidence = float(tracked_dets.confidence[det_idx])
 
                         cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
 
@@ -2602,6 +2628,7 @@ def main():
 
                             plate_candidates[cam_id].append({
                                 "plate":         cleaned_plate,
+                                "tracker_id":    tracker_id,       # sv.ByteTrack id
                                 "yolo_conf":     confidence,
                                 "ocr_conf":      ocr_conf,
                                 "combined":      combined_conf,
@@ -2612,169 +2639,176 @@ def main():
                             })
                             print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [CANDIDATE] {cam_name}: {cleaned_plate} "
                                   f"(YOLO={confidence:.2f} OCR={ocr_conf:.2f} combined={combined_conf:.2f}) "
-                                  f"[{len(plate_candidates[cam_id])} buffered]")
+                                  f"tid={tracker_id} [{len(plate_candidates[cam_id])} buffered]")
 
-                # ── Commit best plate when trigger window closes ──────────────
+                # ── Commit best plate(s) when trigger window closes ───────────
                 if trigger_window_closing:
                     candidates = plate_candidates.get(cam_id, [])
                     if candidates:
-                        # Pick the candidate with the highest combined YOLO+OCR confidence
-                        best = max(candidates, key=lambda c: c["combined"])
-                        cleaned_plate = best["plate"]
-                        ocr_conf      = best["ocr_conf"]
-                        confidence_b  = best["yolo_conf"]
-                        cropped_plate = best["cropped_plate"]
-                        frame_b       = best["full_frame"]
-                        box_b         = best["box"]
-                        timestamp_str = best["timestamp_str"]
-                        x1, y1, x2, y2 = box_b
-                        current_time  = time.time()
+                        # ── Group candidates by ByteTrack tracker_id ─────────
+                        # Each unique tracker_id = one physical vehicle.
+                        # This allows multiple vehicles passing simultaneously
+                        # to each get their own DB record.
+                        from collections import defaultdict
+                        by_track = defaultdict(list)
+                        for c in candidates:
+                            by_track[c.get("tracker_id", -1)].append(c)
 
-                        print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [BEST-PLATE] {cam_name}: "
-                              f"selected '{cleaned_plate}' from {len(candidates)} candidates "
-                              f"(YOLO={confidence_b:.2f} OCR={ocr_conf:.2f} combined={best['combined']:.2f})")
+                        plate_candidates[cam_id] = []  # Reset buffer
 
-                        # Reset candidate buffer
-                        plate_candidates[cam_id] = []
-
-                        # --- Duplicate / cooldown checks (same logic as before) ---
-                        if cam_id not in tracked_vehicles:
-                            tracked_vehicles[cam_id] = []
+                        # Init per-camera tracking dict
+                        if cam_id not in tracked_by_id:
+                            tracked_by_id[cam_id] = {}
                         if cam_id not in recently_logged_plates:
                             recently_logged_plates[cam_id] = {}
 
-                        tracked_vehicles[cam_id] = [
-                            v for v in tracked_vehicles[cam_id]
-                            if current_time - v["last_seen"] < STATIONARY_TIMEOUT
-                        ]
+                        current_time = time.time()
+                        # Expire stale track records
+                        tracked_by_id[cam_id] = {
+                            tid: rec for tid, rec in tracked_by_id[cam_id].items()
+                            if current_time - rec["last_seen"] < TRACK_LOST_SECONDS
+                        }
                         recently_logged_plates[cam_id] = {
                             k: v for k, v in recently_logged_plates[cam_id].items()
                             if current_time - v < LOGGED_SUPPRESSION_TIMEOUT
                         }
 
-                        is_duplicate = False
-                        matched_vehicle = None
-                        max_iou = 0.0
-                        for v in tracked_vehicles[cam_id]:
-                            iou = calculate_iou(box_b, v["box"])
-                            if iou > IOU_THRESHOLD and iou > max_iou:
-                                matched_vehicle = v
-                                max_iou = iou
+                        # ── Per tracker_id: commit best candidate ─────────────
+                        for tid, track_cands in by_track.items():
+                            best = max(track_cands, key=lambda c: c["combined"])
+                            cleaned_plate = best["plate"]
+                            ocr_conf      = best["ocr_conf"]
+                            confidence_b  = best["yolo_conf"]
+                            cropped_plate = best["cropped_plate"]
+                            frame_b       = best["full_frame"]
+                            box_b         = best["box"]
+                            timestamp_str = best["timestamp_str"]
+                            x1, y1, x2, y2 = box_b
 
-                        if matched_vehicle:
-                            matched_vehicle["box"]       = box_b
-                            matched_vehicle["last_seen"] = current_time
-                            is_duplicate = True
+                            print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [BEST-PLATE] {cam_name}: "
+                                  f"tid={tid} '{cleaned_plate}' from {len(track_cands)} candidates "
+                                  f"(YOLO={confidence_b:.2f} OCR={ocr_conf:.2f} combined={best['combined']:.2f})")
 
-                            # If best plate is better than the already-recorded one, update DB
-                            if cleaned_plate != matched_vehicle["plate"] and ocr_conf > matched_vehicle.get("confidence", 0.0):
-                                old_plate = matched_vehicle["plate"]
-                                det_id    = matched_vehicle.get("detection_id")
-                                new_v_type = classify_vehicle_type(cleaned_plate)
-                                if det_id:
-                                    try:
-                                        db_conn = sqlite3.connect(DB_PATH)
-                                        cursor  = db_conn.cursor()
-                                        cursor.execute(
-                                            "UPDATE detections SET plate_number = ?, confidence = ?, vehicle_type = ? WHERE id = ?",
-                                            (cleaned_plate, round(ocr_conf, 2), new_v_type, det_id)
-                                        )
-                                        cursor.execute("DELETE FROM alerts WHERE detection_id = ?", (det_id,))
-                                        cursor.execute("SELECT category, description FROM watchlist WHERE plate_number = ?", (cleaned_plate,))
-                                        watch_res = cursor.fetchone()
-                                        cursor.execute("SELECT COUNT(*) FROM watchlist WHERE plate_number = ?", (old_plate,))
-                                        was_old_alerted = cursor.fetchone()[0] > 0
-                                        if watch_res:
-                                            watch_category, watch_description = watch_res
-                                            action_status, should_suppress = determine_watchlist_action_and_check_suppression(cursor, cleaned_plate)
-                                            if not should_suppress:
-                                                cursor.execute(
-                                                    "INSERT INTO alerts (detection_id, plate_number, category, description, camera_id, action) VALUES (?, ?, ?, ?, ?, ?)",
-                                                    (det_id, cleaned_plate, watch_category, watch_description, cam_id, action_status)
-                                                )
-                                                if not was_old_alerted:
-                                                    cursor.execute("SELECT crop_image_path FROM detections WHERE id = ?", (det_id,))
-                                                    crop_res  = cursor.fetchone()
-                                                    crop_file = crop_res[0] if crop_res else ""
-                                                    if crop_file:
-                                                        send_telegram_notification_async(cleaned_plate, watch_category, watch_description, cam_name, crop_file, action_status)
-                                        db_conn.commit()
-                                        db_conn.close()
-                                        print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Updated stationary plate on {cam_name}: {old_plate} -> {cleaned_plate} (Conf: {round(ocr_conf, 2)})")
-                                    except Exception as e:
-                                        print(f"Error updating stationary plate: {e}")
-                                matched_vehicle["plate"]        = cleaned_plate
-                                matched_vehicle["confidence"]   = ocr_conf
-                                matched_vehicle["vehicle_type"] = new_v_type
-                                recently_logged_plates[cam_id][cleaned_plate] = current_time
+                            # ── Duplicate check 1: ByteTrack tracker_id lookup ─
+                            is_duplicate  = False
+                            matched_rec   = tracked_by_id[cam_id].get(tid)
 
-                        if not is_duplicate:
-                            for logged_plate in recently_logged_plates[cam_id]:
-                                if is_similar_plate(cleaned_plate, logged_plate):
-                                    is_duplicate = True
-                                    recently_logged_plates[cam_id][logged_plate] = current_time
-                                    break
+                            if matched_rec:
+                                # Same physical vehicle seen again – update record
+                                matched_rec["last_seen"] = current_time
+                                is_duplicate = True
+                                # If better OCR → update DB record
+                                if cleaned_plate != matched_rec["plate"] and ocr_conf > matched_rec.get("confidence", 0.0):
+                                    old_plate = matched_rec["plate"]
+                                    det_id    = matched_rec.get("detection_id")
+                                    new_v_type = classify_vehicle_type(cleaned_plate)
+                                    if det_id:
+                                        try:
+                                            db_conn = sqlite3.connect(DB_PATH)
+                                            cursor  = db_conn.cursor()
+                                            cursor.execute(
+                                                "UPDATE detections SET plate_number = ?, confidence = ?, vehicle_type = ? WHERE id = ?",
+                                                (cleaned_plate, round(ocr_conf, 2), new_v_type, det_id)
+                                            )
+                                            cursor.execute("DELETE FROM alerts WHERE detection_id = ?", (det_id,))
+                                            cursor.execute("SELECT category, description FROM watchlist WHERE plate_number = ?", (cleaned_plate,))
+                                            watch_res = cursor.fetchone()
+                                            cursor.execute("SELECT COUNT(*) FROM watchlist WHERE plate_number = ?", (old_plate,))
+                                            was_old_alerted = cursor.fetchone()[0] > 0
+                                            if watch_res:
+                                                watch_category, watch_description = watch_res
+                                                action_status, should_suppress = determine_watchlist_action_and_check_suppression(cursor, cleaned_plate)
+                                                if not should_suppress:
+                                                    cursor.execute(
+                                                        "INSERT INTO alerts (detection_id, plate_number, category, description, camera_id, action) VALUES (?, ?, ?, ?, ?, ?)",
+                                                        (det_id, cleaned_plate, watch_category, watch_description, cam_id, action_status)
+                                                    )
+                                                    if not was_old_alerted:
+                                                        cursor.execute("SELECT crop_image_path FROM detections WHERE id = ?", (det_id,))
+                                                        crop_res  = cursor.fetchone()
+                                                        crop_file = crop_res[0] if crop_res else ""
+                                                        if crop_file:
+                                                            send_telegram_notification_async(cleaned_plate, watch_category, watch_description, cam_name, crop_file, action_status)
+                                            db_conn.commit()
+                                            db_conn.close()
+                                            print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [TRACK] Updated tid={tid} on {cam_name}: {old_plate} -> {cleaned_plate} (Conf: {round(ocr_conf, 2)})")
+                                        except Exception as e:
+                                            print(f"Error updating tracked plate: {e}")
+                                    matched_rec["plate"]        = cleaned_plate
+                                    matched_rec["confidence"]   = ocr_conf
+                                    matched_rec["vehicle_type"] = classify_vehicle_type(cleaned_plate)
+                                    recently_logged_plates[cam_id][cleaned_plate] = current_time
 
-                        if is_duplicate:
-                            pass  # Skip insert but don't block the rest of the loop
-                        else:
-                            # Per-camera cooldown check
+                            # ── Duplicate check 2: string similarity fallback ──
+                            if not is_duplicate:
+                                for logged_plate in recently_logged_plates[cam_id]:
+                                    if is_similar_plate(cleaned_plate, logged_plate):
+                                        is_duplicate = True
+                                        recently_logged_plates[cam_id][logged_plate] = current_time
+                                        break
+
+                            if is_duplicate:
+                                continue  # Next tracker_id
+
+                            # ── New vehicle: cooldown check then DB insert ─────
                             last_save_time = camera_save_cooldown.get(cam_id, 0.0)
                             if current_time - last_save_time < SAVE_COOLDOWN_SECONDS:
                                 print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [COOLDOWN] {cam_name} cooldown active "
                                       f"({SAVE_COOLDOWN_SECONDS - (current_time - last_save_time):.1f}s remaining), skipping {cleaned_plate}")
-                            else:
-                                v_type = classify_vehicle_type(cleaned_plate)
-                                recently_logged_plates[cam_id][cleaned_plate] = current_time
+                                continue
 
-                                crop_filename = f"crop_{cleaned_plate}_{timestamp_str}.jpg"
-                                full_filename = f"full_{cleaned_plate}_{timestamp_str}.jpg"
-                                crop_path     = os.path.join(CROPS_DIR, crop_filename)
-                                full_path     = os.path.join(FULLS_DIR, full_filename)
+                            v_type = classify_vehicle_type(cleaned_plate)
+                            recently_logged_plates[cam_id][cleaned_plate] = current_time
 
-                                cv2.imwrite(crop_path, cropped_plate)
-                                cv2.imwrite(full_path, frame_b)
+                            crop_filename = f"crop_{cleaned_plate}_{timestamp_str}.jpg"
+                            full_filename = f"full_{cleaned_plate}_{timestamp_str}.jpg"
+                            crop_path     = os.path.join(CROPS_DIR, crop_filename)
+                            full_path     = os.path.join(FULLS_DIR, full_filename)
 
-                                db_conn = sqlite3.connect(DB_PATH)
-                                cursor  = db_conn.cursor()
-                                cursor.execute(
-                                    "INSERT INTO detections (plate_number, confidence, crop_image_path, full_image_path, vehicle_type, camera_id) "
-                                    "VALUES (?, ?, ?, ?, ?, ?)",
-                                    (cleaned_plate, round(ocr_conf, 2), crop_filename, full_filename, v_type, cam_id)
-                                )
-                                detection_id = cursor.lastrowid
+                            cv2.imwrite(crop_path, cropped_plate)
+                            cv2.imwrite(full_path, frame_b)
 
-                                cursor.execute("SELECT category, description FROM watchlist WHERE plate_number = ?", (cleaned_plate,))
-                                watch_res = cursor.fetchone()
-                                if watch_res:
-                                    watch_category, watch_description = watch_res
-                                    action_status, should_suppress = determine_watchlist_action_and_check_suppression(cursor, cleaned_plate)
-                                    if not should_suppress:
-                                        cursor.execute(
-                                            "INSERT INTO alerts (detection_id, plate_number, category, description, camera_id, action) VALUES (?, ?, ?, ?, ?, ?)",
-                                            (detection_id, cleaned_plate, watch_category, watch_description, cam_id, action_status)
-                                        )
-                                        print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] !!! ALERT !!! Tracked Vehicle {cleaned_plate} "
-                                              f"({watch_category}) [{action_status}] detected on {cam_name}: {watch_description}")
-                                        send_telegram_notification_async(cleaned_plate, watch_category, watch_description, cam_name, crop_filename, action_status)
-                                    else:
-                                        print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Watchlist Vehicle {cleaned_plate} detected but suppressed (duplicate within 3 min).")
+                            db_conn = sqlite3.connect(DB_PATH)
+                            cursor  = db_conn.cursor()
+                            cursor.execute(
+                                "INSERT INTO detections (plate_number, confidence, crop_image_path, full_image_path, vehicle_type, camera_id) "
+                                "VALUES (?, ?, ?, ?, ?, ?)",
+                                (cleaned_plate, round(ocr_conf, 2), crop_filename, full_filename, v_type, cam_id)
+                            )
+                            detection_id = cursor.lastrowid
 
-                                db_conn.commit()
-                                db_conn.close()
+                            cursor.execute("SELECT category, description FROM watchlist WHERE plate_number = ?", (cleaned_plate,))
+                            watch_res = cursor.fetchone()
+                            if watch_res:
+                                watch_category, watch_description = watch_res
+                                action_status, should_suppress = determine_watchlist_action_and_check_suppression(cursor, cleaned_plate)
+                                if not should_suppress:
+                                    cursor.execute(
+                                        "INSERT INTO alerts (detection_id, plate_number, category, description, camera_id, action) VALUES (?, ?, ?, ?, ?, ?)",
+                                        (detection_id, cleaned_plate, watch_category, watch_description, cam_id, action_status)
+                                    )
+                                    print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] !!! ALERT !!! Tracked Vehicle {cleaned_plate} "
+                                          f"({watch_category}) [{action_status}] detected on {cam_name}: {watch_description}")
+                                    send_telegram_notification_async(cleaned_plate, watch_category, watch_description, cam_name, crop_filename, action_status)
+                                else:
+                                    print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Watchlist Vehicle {cleaned_plate} detected but suppressed (duplicate within 3 min).")
 
-                                tracked_vehicles[cam_id].append({
-                                    "box":          box_b,
-                                    "plate":        cleaned_plate,
-                                    "last_seen":    current_time,
-                                    "vehicle_type": v_type,
-                                    "detection_id": detection_id,
-                                    "confidence":   ocr_conf
-                                })
+                            db_conn.commit()
+                            db_conn.close()
 
-                                camera_save_cooldown[cam_id] = current_time
-                                print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] DETECTED on {cam_name}: "
-                                      f"{cleaned_plate} (YOLO={confidence_b:.2f} OCR={ocr_conf:.2f}) [best of {len(candidates)} candidates]")
+                            # ── Register in ByteTrack record table ───────────
+                            tracked_by_id[cam_id][tid] = {
+                                "plate":        cleaned_plate,
+                                "last_seen":    current_time,
+                                "vehicle_type": v_type,
+                                "detection_id": detection_id,
+                                "confidence":   ocr_conf,
+                            }
+
+                            camera_save_cooldown[cam_id] = current_time
+                            print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] DETECTED on {cam_name}: "
+                                  f"{cleaned_plate} tid={tid} (YOLO={confidence_b:.2f} OCR={ocr_conf:.2f}) "
+                                  f"[best of {len(track_cands)}/{len(candidates)} candidates]")
                     else:
                         # Trigger window closed but no valid candidates were accumulated
                         plate_candidates[cam_id] = []
