@@ -1732,11 +1732,12 @@ let zoneSnapshotTimer = null;
 // ── Init: populate camera dropdown then load first camera ──────────────────
 async function zoneEditorInit() {
     try {
-        const res = await apiFetch('/api/camera');
+        const res = await fetch('/api/cameras');
         const cameras = await res.json();
         zoneActiveCameras = cameras;
         const sel = document.getElementById('zone-cam-select');
         sel.innerHTML = '';
+        sel.style.cssText = 'color:#e2e8f0;background:#1a2234;border:1px solid rgba(0,220,255,0.4);padding:4px 10px;border-radius:6px;min-width:180px;';
         cameras.forEach(cam => {
             const opt = document.createElement('option');
             opt.value = cam.id;
@@ -1770,7 +1771,7 @@ async function zoneEditorRefreshSnapshot() {
 // ── Fetch zone polygon from API and render ─────────────────────────────────
 async function zoneEditorFetchPolygon(camId) {
     try {
-        const res = await apiFetch('/api/zones');
+        const res = await fetch('/api/zones');
         const data = await res.json();
         const key  = String(camId);
         if (data[key]) {
@@ -1911,7 +1912,7 @@ async function zoneEditorSave() {
         Math.round(p.y * ZONE_SCALE)
     ]);
     try {
-        const res = await apiFetch('/api/zones', {
+        const res = await fetch('/api/zones', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ cam_id: zoneCurrentCamId, polygon })
