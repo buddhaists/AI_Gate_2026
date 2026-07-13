@@ -677,6 +677,14 @@
                                     </div>
                                 </div>
 
+                                <div style="display: flex; gap: 14px; align-items: flex-start; padding: 12px; background: rgba(255,255,255,0.02); border-radius: 8px; border: 1px solid rgba(255,255,255,0.03);">
+                                    <div style="font-size: 20px; color: #10b981; padding-top: 2px;"><i class="fa-solid fa-draw-polygon"></i></div>
+                                    <div>
+                                        <h4 style="margin: 0 0 4px 0; color: var(--text-primary); font-size: 14px;">多邊形閘門區域與 ByteTrack 追蹤</h4>
+                                        <p style="margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.5;">整合 Supervision 閘門偵測區（PolygonZone）與線上編輯器，搭配 Kalman 濾波動態追蹤（ByteTrack），可手動任意拖曳頂點、即時熱載入生效，並支援雙車道多車並行獨立辨識。</p>
+                                    </div>
+                                </div>
+
                             </div>
                         </div>
                     </div>
@@ -689,11 +697,25 @@
                         <div style="flex: 1; overflow-y: auto; max-height: 700px; padding-right: 8px; font-family: var(--font-tc);">
                             <div class="timeline" style="position: relative; border-left: 2px solid rgba(255,255,255,0.08); padding-left: 20px; margin-left: 10px;">
                                 
-                                <!-- v3.3 -->
+                                <!-- v3.4 -->
                                 <div style="position: relative; margin-bottom: 24px;">
                                     <div style="position: absolute; left: -27px; top: 4px; width: 12px; height: 12px; border-radius: 50%; background: var(--color-primary); box-shadow: 0 0 8px var(--color-primary);"></div>
-                                    <span style="font-size: 11px; font-weight: bold; color: var(--color-primary); background: rgba(16,185,129,0.15); padding: 2px 8px; border-radius: 20px;">v3.3</span>
-                                    <span style="font-size: 11px; color: var(--text-secondary); margin-left: 8px;">2026-07-07 (當前版本)</span>
+                                    <span style="font-size: 11px; font-weight: bold; color: var(--color-primary); background: rgba(16,185,129,0.15); padding: 2px 8px; border-radius: 20px;">v3.4</span>
+                                    <span style="font-size: 11px; color: var(--text-secondary); margin-left: 8px;">2026-07-13 (當前版本)</span>
+                                    <h4 style="margin: 8px 0 4px 0; color: var(--text-primary); font-size: 13px;">多邊形閘門偵測編輯器與 Supervision ByteTrack 追蹤整合</h4>
+                                    <ul style="margin: 0; padding-left: 16px; color: var(--text-secondary); font-size: 12px; line-height: 1.5; display: flex; flex-direction: column; gap: 4px;">
+                                        <li><strong>多邊形偵測區域編輯器</strong>：新增「偵測區域設定」面板，支援滑鼠與觸控拖曳四點頂點，直覺調整 `sv.PolygonZone` 閘門偵測區過濾範圍，實時換算 1920x1080 全畫幅像素座標。</li>
+                                        <li><strong>熱重載免重啟機制</strong>：後端新增 `/api/zones` API，區域變更儲存後直接寫入 `zone_config.json` 並即時更新記憶體過濾遮罩，無須重啟 LPR 引擎。</li>
+                                        <li><strong>Supervision ByteTrack 追蹤整合</strong>：引進 `sv.ByteTrack` 追蹤演算法（Kalman 濾波與 IoU 配對）全面取代舊有單幀 IoU 比對，確保在 30 幀的觸發窗口期中維持車輛 ID 穩定度，大幅提升移動中車輛的追蹤可靠性。</li>
+                                        <li><strong>多車並行偵測與去重</strong>：利用 ByteTrack ID 分組處理，當多台車輛同時通過時，可各自獨立積累最佳車牌並寫入資料庫，完全解決過去一次只能記錄一台車的限制。</li>
+                                    </ul>
+                                </div>
+
+                                <!-- v3.3 -->
+                                <div style="position: relative; margin-bottom: 24px;">
+                                    <div style="position: absolute; left: -27px; top: 4px; width: 12px; height: 12px; border-radius: 50%; background: var(--color-blue);"></div>
+                                    <span style="font-size: 11px; font-weight: bold; color: var(--color-blue); background: rgba(59,130,246,0.15); padding: 2px 8px; border-radius: 20px;">v3.3</span>
+                                    <span style="font-size: 11px; color: var(--text-secondary); margin-left: 8px;">2026-07-07</span>
                                     <h4 style="margin: 8px 0 4px 0; color: var(--text-primary); font-size: 13px;">CPU負載極致優化與 OpenVINO 運作穩定度提升</h4>
                                     <ul style="margin: 0; padding-left: 16px; color: var(--text-secondary); font-size: 12px; line-height: 1.5; display: flex; flex-direction: column; gap: 4px;">
                                         <li><strong>OpenVINO CPU 穩定加速</strong>：將 YOLO 辨識轉為 OpenVINO 模型並固定於 CPU 執行，避開 Intel UHD 630 顯卡驅動的 CISA 編譯器閃退 Bug，同時仍保有 27ms 的高速推論效能。</li>
