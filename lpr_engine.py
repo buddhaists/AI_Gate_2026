@@ -30,7 +30,7 @@ import base64
 import urllib.parse
 import urllib.request
 import subprocess
-from collections import defaultdict, Counter  # moved from hot-path inline imports
+from collections import defaultdict, Counter, deque  # moved from hot-path inline imports
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import TCPServer
 from ultralytics import YOLO
