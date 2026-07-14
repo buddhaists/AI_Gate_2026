@@ -2160,11 +2160,14 @@ def main():
         print(f"[SYSTEM] Could not limit PyTorch threads: {e}")
     
     # Load PaddleOCR
-    # det=False: YOLO already locates the plate; skip the text-detection stage
-    # (~50-100ms saved per call). use_angle_cls=False: plates are always horizontal.
-    print("Initializing PaddleOCR with enable_mkldnn=False, det=False...")
+    # Note: det=False is not supported in this PaddleOCR version (raises ValueError).
+    # YOLO crop is tight enough that the detection stage overhead is acceptable.
+    # use_textline_orientation replaces deprecated use_angle_cls (plates are horizontal).
+    # text_recognition_batch_size replaces deprecated rec_batch_num.
+    print("Initializing PaddleOCR with enable_mkldnn=False...")
     ocr = PaddleOCR(lang='en', enable_mkldnn=False, use_angle_cls=False,
-                    rec_batch_num=1, det=False)
+                    rec_batch_num=1)
+
 
     # ── 改進 8: Cache CLAHE object (created once, reused every frame) ─────────
     _clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
