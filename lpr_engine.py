@@ -636,7 +636,7 @@ def sync_active_readers():
                 active_readers[cam_id] = reader
 
 # YOLO Model Path
-MODEL_PATH = "yolov8n_lpr_openvino_model"  # OpenVINO format for Intel UHD 630 GPU inference
+MODEL_PATH = "license-plate-finetune-v1n_openvino_model"  # YOLOv11n OpenVINO — 2x faster than v8n (58ms vs 118ms/frame on CPU)
 
 class RTSPVideoReader:
     def __init__(self, url, cam_id=None, name=""):
@@ -2417,7 +2417,7 @@ def main():
 
     # Load YOLO Model with OpenVINO on CPU
     # (Intel GPU compiler has bugs with certain layers, causing CISA routine errors and crashes)
-    print(f"Loading YOLOv8 model from {MODEL_PATH} (device=cpu)...")
+    print(f"Loading YOLOv11n model from {MODEL_PATH} (device=cpu)...")
     model = YOLO(MODEL_PATH, task='detect')
     # Force first prediction to compile model on CPU
     import numpy as np
