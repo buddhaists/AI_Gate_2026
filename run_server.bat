@@ -1,8 +1,9 @@
 @echo off
-title AI LPR Gate Monitor Server
+title AI LPR Gate Monitor Server (Python 3.12)
 echo ===================================================
-echo   AI 智慧學校大門車牌監控系統 啟動中...
+echo   AI Camera Gate Monitor - Engine Starting...
+echo   Python: 3.12
 echo ===================================================
 cd /d "D:\AntiGravity\ai camera-gate"
-python -u lpr_engine.py
+"C:\Users\username\AppData\Local\Programs\Python\Python312\python.exe" -u lpr_engine.py
 pause

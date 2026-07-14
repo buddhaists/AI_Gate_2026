@@ -11,7 +11,7 @@
 
 $EnginePath    = "d:\AntiGravity\ai camera-gate"
 $EngineScript  = "lpr_engine.py"
-$PythonExe     = "python"
+$PythonExe     = "C:\Users\username\AppData\Local\Programs\Python\Python312\python.exe"
 $LogFile       = "D:\AntiGravity\lpr_data\watchdog.log"
 $CheckInterval = 30   # seconds
 
