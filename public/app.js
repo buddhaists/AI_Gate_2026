@@ -778,6 +778,8 @@ async function loadWatchlist(page = 0) {
         emptyDiv.classList.add('hidden');
         let rowsHtml = '';
         list.forEach(item => {
+            // Use encodeURIComponent-safe data-* attrs to avoid quote-injection in onclick
+            const safeDesc = (item.description || '').replace(/"/g, '&quot;');
             rowsHtml += `
                 <tr>
                     <td><span class="table-plate-text">${item.plate_number}</span></td>
@@ -785,9 +787,18 @@ async function loadWatchlist(page = 0) {
                     <td>${item.description || '-'}</td>
                     <td>${item.created_at}</td>
                     <td>
-                        <button class="btn-delete" onclick="deleteWatchlistItem('${item.plate_number}')">
-                            <i class="fa-solid fa-trash-can"></i> 刪除
-                        </button>
+                        <div class="wl-action-btns">
+                            <button class="btn-edit-wl"
+                                data-plate="${item.plate_number}"
+                                data-category="${item.category}"
+                                data-desc="${safeDesc}"
+                                onclick="openWatchlistEditModal(this)">
+                                <i class="fa-solid fa-pen"></i> 編輯
+                            </button>
+                            <button class="btn-delete" onclick="deleteWatchlistItem('${item.plate_number}')">
+                                <i class="fa-solid fa-trash-can"></i> 刪除
+                            </button>
+                        </div>
                     </td>
                 </tr>
             `;
@@ -906,6 +917,110 @@ async function deleteWatchlistItem(plate) {
     } catch (err) {
         alert("刪除連線失敗，請檢查網路。");
         console.error("Delete watchlist error:", err);
+    }
+}
+
+// ── Watchlist Edit Modal functions ────────────────────────────────────────────
+
+/**
+ * Open the edit modal and pre-fill fields from the clicked row's data-* attributes.
+ * @param {HTMLElement} btn - The edit button element
+ */
+function openWatchlistEditModal(btn) {
+    const plate    = btn.dataset.plate    || '';
+    const category = btn.dataset.category || 'BLACKLIST';
+    const desc     = btn.dataset.desc     || '';
+
+    document.getElementById('wl-edit-original-plate').value = plate;
+    document.getElementById('wl-edit-plate').value           = plate;
+    document.getElementById('wl-edit-category').value        = category;
+    document.getElementById('wl-edit-description').value     = desc;
+
+    const errDiv = document.getElementById('wl-edit-error');
+    errDiv.style.display = 'none';
+    errDiv.textContent   = '';
+
+    const saveBtn = document.getElementById('wl-save-btn');
+    saveBtn.disabled    = false;
+    saveBtn.innerHTML   = '<i class="fa-solid fa-floppy-disk"></i> 儲存修改';
+
+    const modal = document.getElementById('watchlist-edit-modal');
+    modal.style.display = 'flex';
+    // Focus on plate input after animation
+    setTimeout(() => document.getElementById('wl-edit-plate').focus(), 80);
+
+    // Escape key closes modal
+    modal._escHandler = (e) => { if (e.key === 'Escape') closeWatchlistEditModal(); };
+    document.addEventListener('keydown', modal._escHandler);
+}
+
+/**
+ * Close the watchlist edit modal.
+ * @param {Event} [evt] - Optional backdrop click event (checks target)
+ */
+function closeWatchlistEditModal(evt) {
+    if (evt && evt.target !== document.getElementById('watchlist-edit-modal')) return;
+    const modal = document.getElementById('watchlist-edit-modal');
+    modal.style.display = 'none';
+    if (modal._escHandler) {
+        document.removeEventListener('keydown', modal._escHandler);
+        modal._escHandler = null;
+    }
+}
+
+/**
+ * Submit the edit modal form via PUT /api/watchlist.
+ */
+async function saveWatchlistEdit() {
+    const originalPlate = document.getElementById('wl-edit-original-plate').value.trim();
+    const newPlate      = document.getElementById('wl-edit-plate').value.trim().toUpperCase();
+    const category      = document.getElementById('wl-edit-category').value;
+    const description   = document.getElementById('wl-edit-description').value.trim();
+
+    const errDiv  = document.getElementById('wl-edit-error');
+    const saveBtn = document.getElementById('wl-save-btn');
+
+    errDiv.style.display = 'none';
+
+    if (!newPlate) {
+        errDiv.textContent   = '車牌號碼不可為空。';
+        errDiv.style.display = 'block';
+        return;
+    }
+
+    // Disable button and show saving state
+    saveBtn.disabled  = true;
+    saveBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 儲存中...';
+
+    try {
+        const res = await fetch('/api/watchlist', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                original_plate: originalPlate,
+                plate_number:   newPlate,
+                category:       category,
+                description:    description
+            })
+        });
+
+        const result = await res.json();
+
+        if (result.success) {
+            closeWatchlistEditModal();
+            loadWatchlist(watchlistCurrentPage);  // Refresh table
+        } else {
+            errDiv.textContent   = '儲存失敗：' + (result.error || '未知錯誤');
+            errDiv.style.display = 'block';
+            saveBtn.disabled     = false;
+            saveBtn.innerHTML    = '<i class="fa-solid fa-floppy-disk"></i> 儲存修改';
+        }
+    } catch (err) {
+        errDiv.textContent   = '連線失敗，請重試。';
+        errDiv.style.display = 'block';
+        saveBtn.disabled     = false;
+        saveBtn.innerHTML    = '<i class="fa-solid fa-floppy-disk"></i> 儲存修改';
+        console.error('saveWatchlistEdit error:', err);
     }
 }
 

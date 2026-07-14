@@ -938,6 +938,110 @@
         </div>
     </div>
 
-    <script src="app.js?v=14"></script>
+    <script src="app.js?v=15"></script>
+
+    <!-- ═══ 追蹤名單編輯 Modal ═══════════════════════════════════════════ -->
+    <div id="watchlist-edit-modal" class="wl-modal-backdrop" onclick="closeWatchlistEditModal(event)" role="dialog" aria-modal="true" aria-labelledby="wl-modal-title" style="display:none;">
+        <div class="wl-modal-box" onclick="event.stopPropagation()">
+            <div class="wl-modal-header">
+                <h3 id="wl-modal-title"><i class="fa-solid fa-pen-to-square"></i> 編輯追蹤車牌</h3>
+                <button class="wl-modal-close" onclick="closeWatchlistEditModal()" aria-label="關閉">&times;</button>
+            </div>
+            <div class="wl-modal-body">
+                <input type="hidden" id="wl-edit-original-plate">
+                <div class="form-group">
+                    <label for="wl-edit-plate">車牌號碼</label>
+                    <input type="text" id="wl-edit-plate" required placeholder="例如: ABC-1234"
+                           style="text-transform:uppercase; letter-spacing:.08em;">
+                </div>
+                <div class="form-group">
+                    <label for="wl-edit-category">追蹤類別</label>
+                    <select id="wl-edit-category" required>
+                        <option value="BLACKLIST">BLACKLIST（黑名單 / 警報）</option>
+                        <option value="VIP">VIP（重要貴賓 / 提醒）</option>
+                        <option value="SUSPICIOUS">SUSPICIOUS（可疑車輛）</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="wl-edit-description">說明備註</label>
+                    <input type="text" id="wl-edit-description" placeholder="備註說明（例如：違規車輛、校長專車）">
+                </div>
+                <div id="wl-edit-error" class="wl-error-msg" style="display:none;"></div>
+            </div>
+            <div class="wl-modal-footer">
+                <button class="btn btn-secondary" onclick="closeWatchlistEditModal()">
+                    <i class="fa-solid fa-xmark"></i> 取消
+                </button>
+                <button class="btn btn-primary" id="wl-save-btn" onclick="saveWatchlistEdit()">
+                    <i class="fa-solid fa-floppy-disk"></i> 儲存修改
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <style>
+    /* ── Watchlist Edit Modal styles ──────────────────────────────────── */
+    .wl-modal-backdrop {
+        position: fixed; inset: 0; z-index: 9999;
+        background: rgba(0,0,0,.55);
+        backdrop-filter: blur(6px);
+        display: flex !important;
+        align-items: center;
+        justify-content: center;
+        animation: wlFadeIn .18s ease;
+    }
+    @keyframes wlFadeIn { from{opacity:0} to{opacity:1} }
+    .wl-modal-box {
+        width: min(480px, 94vw);
+        background: linear-gradient(145deg, rgba(30,34,54,.97), rgba(22,26,44,.97));
+        border: 1px solid rgba(255,255,255,.13);
+        border-radius: 16px;
+        box-shadow: 0 24px 64px rgba(0,0,0,.55);
+        animation: wlSlideUp .22s cubic-bezier(.34,1.56,.64,1);
+        overflow: hidden;
+    }
+    @keyframes wlSlideUp { from{transform:translateY(24px) scale(.96);opacity:0} to{transform:none;opacity:1} }
+    .wl-modal-header {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 18px 22px 14px;
+        border-bottom: 1px solid rgba(255,255,255,.07);
+    }
+    .wl-modal-header h3 {
+        font-size: 16px; font-weight: 700; color: var(--text-primary);
+        display: flex; align-items: center; gap: 9px; margin: 0;
+    }
+    .wl-modal-header h3 i { color: #7c8bff; }
+    .wl-modal-close {
+        background: none; border: none; color: var(--text-secondary);
+        font-size: 22px; line-height:1; cursor: pointer; padding: 2px 6px;
+        border-radius: 6px; transition: background .15s, color .15s;
+    }
+    .wl-modal-close:hover { background: rgba(255,255,255,.08); color: var(--text-primary); }
+    .wl-modal-body { padding: 20px 22px; display: flex; flex-direction: column; gap: 14px; }
+    .wl-modal-footer {
+        padding: 14px 22px 18px;
+        border-top: 1px solid rgba(255,255,255,.07);
+        display: flex; justify-content: flex-end; gap: 10px;
+    }
+    .wl-error-msg {
+        background: rgba(255,80,80,.12); border: 1px solid rgba(255,80,80,.35);
+        color: #ff7070; border-radius: 8px; padding: 8px 12px; font-size: 13px;
+    }
+    /* Edit button in watchlist table */
+    .btn-edit-wl {
+        background: linear-gradient(135deg,rgba(124,139,255,.18),rgba(124,139,255,.08));
+        border: 1px solid rgba(124,139,255,.35);
+        color: #7c8bff; border-radius: 7px;
+        padding: 5px 11px; font-size: 12px; font-weight: 600; cursor: pointer;
+        transition: background .18s, transform .12s, box-shadow .18s;
+        display: inline-flex; align-items: center; gap: 5px;
+    }
+    .btn-edit-wl:hover {
+        background: linear-gradient(135deg,rgba(124,139,255,.32),rgba(124,139,255,.16));
+        box-shadow: 0 2px 12px rgba(124,139,255,.25);
+        transform: translateY(-1px);
+    }
+    .wl-action-btns { display: flex; gap: 6px; }
+    </style>
 </body>
 </html>

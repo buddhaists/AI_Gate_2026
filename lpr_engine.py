@@ -2111,6 +2111,70 @@ class LPRHTTPServerHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(json.dumps({"success": False, "error": str(e)}).encode('utf-8'))
 
+    def do_PUT(self):
+        """Handle PUT /api/watchlist — edit an existing watchlist entry."""
+        # Check HTTP Basic Authentication
+        auth_header = self.headers.get('Authorization')
+        if not self.check_auth(auth_header):
+            self.send_response(401)
+            self.send_header('WWW-Authenticate', 'Basic realm="LPR System"')
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_cors_headers()
+            self.end_headers()
+            self.wfile.write(b'<h1>401 Unauthorized</h1>')
+            return
+
+        parsed_url = urllib.parse.urlparse(self.path)
+        path = parsed_url.path
+
+        if path == "/api/watchlist":
+            content_length = int(self.headers.get('Content-Length', 0))
+            raw = self.rfile.read(content_length).decode('utf-8')
+            try:
+                data = json.loads(raw)
+                original_plate = clean_plate_text(data.get('original_plate', '').strip())
+                new_plate      = clean_plate_text(data.get('plate_number', '').strip())
+                category       = data.get('category', '').strip().upper()
+                description    = data.get('description', '').strip()
+
+                if not original_plate or not new_plate or not category:
+                    raise ValueError("original_plate, plate_number, category 為必填欄位")
+
+                conn   = sqlite3.connect(DB_PATH)
+                cursor = conn.cursor()
+
+                if original_plate != new_plate:
+                    # 車牌號碼已修改：先刪除舊記錄，再插入新記錄
+                    cursor.execute("DELETE FROM watchlist WHERE plate_number = ?", (original_plate,))
+                    cursor.execute("""
+                        INSERT INTO watchlist (plate_number, category, description)
+                        VALUES (?, ?, ?)
+                    """, (new_plate, category, description))
+                else:
+                    # 只更新 category / description，保留 created_at
+                    cursor.execute("""
+                        UPDATE watchlist SET category=?, description=?
+                        WHERE plate_number=?
+                    """, (category, description, original_plate))
+
+                conn.commit()
+                conn.close()
+
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_cors_headers()
+                self.end_headers()
+                self.wfile.write(json.dumps({"success": True, "plate_number": new_plate}).encode('utf-8'))
+            except Exception as e:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_cors_headers()
+                self.end_headers()
+                self.wfile.write(json.dumps({"success": False, "error": str(e)}).encode('utf-8'))
+        else:
+            self.send_response(404)
+            self.end_headers()
+
     def do_DELETE(self):
         # Check HTTP Basic Authentication
         auth_header = self.headers.get('Authorization')
