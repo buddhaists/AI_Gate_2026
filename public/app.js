@@ -605,6 +605,16 @@ async function queryHistory(page = 0) {
             const vIcon = det.vehicle_type === 'MOTORCYCLE' 
                 ? '<i class="fa-solid fa-motorcycle" style="margin-right: 6px; font-size: 12px; opacity: 0.7;"></i>' 
                 : '<i class="fa-solid fa-car" style="margin-right: 6px; font-size: 12px; opacity: 0.7;"></i>';
+
+            // 方向標籤：ENTER=綠色↓, EXIT=橘色↑, UNKNOWN=灰色
+            let dirBadge = '<span style="color:var(--text-secondary);font-size:11px;">—</span>';
+            if (det.direction === 'ENTER') {
+                dirBadge = `<span style="display:inline-flex;align-items:center;gap:3px;background:rgba(34,197,94,0.15);color:#22c55e;border:1px solid rgba(34,197,94,0.3);border-radius:4px;padding:2px 7px;font-size:11px;font-weight:600;">
+                    <i class="fa-solid fa-arrow-down" style="font-size:9px;"></i> 進場</span>`;
+            } else if (det.direction === 'EXIT') {
+                dirBadge = `<span style="display:inline-flex;align-items:center;gap:3px;background:rgba(249,115,22,0.15);color:#f97316;border:1px solid rgba(249,115,22,0.3);border-radius:4px;padding:2px 7px;font-size:11px;font-weight:600;">
+                    <i class="fa-solid fa-arrow-up" style="font-size:9px;"></i> 離場</span>`;
+            }
             
             tableRows += `
                 <tr>
@@ -615,11 +625,14 @@ async function queryHistory(page = 0) {
                         </div>
                     </td>
                     <td>
-                        <div style="display: inline-flex; align-items: center; gap: 8px;">
-                            ${vIcon}<span class="table-plate-text">${det.plate_number}</span>
-                            <button class="btn-edit-plate" onclick="openEditModal(${det.id}, '${det.plate_number}')" title="修正車牌">
-                                <i class="fa-solid fa-pen"></i>
-                            </button>
+                        <div style="display: flex; flex-direction: column; gap: 4px;">
+                            <div style="display: inline-flex; align-items: center; gap: 8px;">
+                                ${vIcon}<span class="table-plate-text">${det.plate_number}</span>
+                                <button class="btn-edit-plate" onclick="openEditModal(${det.id}, '${det.plate_number}')" title="修正車牌">
+                                    <i class="fa-solid fa-pen"></i>
+                                </button>
+                            </div>
+                            ${dirBadge}
                         </div>
                     </td>
                     <td><span class="table-conf-text">${Math.round(det.confidence * 100)}%</span></td>
@@ -636,6 +649,7 @@ async function queryHistory(page = 0) {
             `;
         });
         tbody.innerHTML = tableRows;
+
         
         // Update pagination page buttons
         updatePaginationUI(total);

@@ -204,6 +204,32 @@ def vote_plate_text(ocr_history: list) -> str:
             result_chars.append(max(char_votes, key=char_votes.get))
     return ''.join(result_chars)
 
+def compute_direction(y_history: list) -> str:
+    """根據車輛中心點 Y 座標歷史判斷行進方向。
+
+    攝影機坐標系：Y=0 在畫面頂部，向下遞增。
+      - 若後半段 Y 均值 > 前半段 → 車輛向下移動 → 進場 (ENTER)
+      - 若後半段 Y 均值 < 前半段 → 車輛向上移動 → 離場 (EXIT)
+      - 樣本不足或移動量不顯著 → UNKNOWN
+
+    Args:
+        y_history: list of int, center_y pixel coordinates per frame
+
+    Returns:
+        'ENTER', 'EXIT', or 'UNKNOWN'
+    """
+    if len(y_history) < 4:
+        return 'UNKNOWN'
+    half = len(y_history) // 2
+    first_mean  = sum(y_history[:half]) / half
+    second_mean = sum(y_history[half:]) / (len(y_history) - half)
+    dy = second_mean - first_mean
+    if dy > 8:    # 向下移動（Y 增加）→ 進場
+        return 'ENTER'
+    elif dy < -8:  # 向上移動（Y 減少）→ 離場
+        return 'EXIT'
+    return 'UNKNOWN'
+
 # Background image save queue — offloads cv2.imwrite from the main detection loop
 _image_save_queue = queue.Queue(maxsize=64)
 def _image_saver_worker():
@@ -377,6 +403,12 @@ def init_db():
         
     try:
         cursor.execute("ALTER TABLE detections ADD COLUMN camera_id INTEGER DEFAULT 1")
+    except sqlite3.OperationalError:
+        pass
+
+    # DB migration: direction column (ENTER/EXIT/UNKNOWN)
+    try:
+        cursor.execute("ALTER TABLE detections ADD COLUMN direction TEXT DEFAULT 'UNKNOWN'")
     except sqlite3.OperationalError:
         pass
         
@@ -1444,6 +1476,7 @@ class LPRHTTPServerHandler(BaseHTTPRequestHandler):
             sql_data = """
                 SELECT d.id, datetime(d.timestamp, 'localtime') as local_time, 
                        d.plate_number, d.confidence, d.crop_image_path, d.full_image_path, d.vehicle_type,
+                       d.direction,
                        w.category as watch_category, w.description as watch_description,
                        c.name as camera_name
                 FROM detections d
@@ -2535,6 +2568,7 @@ def main():
     #   ...
     # ]
     plate_candidates = {}   # key: cam_id
+    track_y_history  = {}   # cam_id -> {tracker_id: [center_y, ...]} — for direction detection
 
     # ── Improvement 3: sv.PolygonZone gate detection zones ───────────────────
     # Loaded from zone_config.json (or DEFAULT_ZONE_POLYGONS if first run).
@@ -2763,8 +2797,9 @@ def main():
                     cam_trigger_frames -= 1
                     lpr_trigger_frames[cam_id] = cam_trigger_frames
                     if cam_trigger_frames == 24:
-                        # First frame of window: reset candidate buffer for this camera
+                        # First frame of window: reset candidate buffer + Y history for this camera
                         plate_candidates[cam_id] = []
+                        track_y_history[cam_id]  = {}
                         print(f"[SYSTEM] {cam_name} driveway motion trigger: running LPR detection (30 frames).")
                     if cam_trigger_frames == 0:
                         trigger_window_closing = True  # Window just expired → commit best plate
@@ -2886,6 +2921,15 @@ def main():
                             if tracked_dets.tracker_id is not None else -1
 
                         confidence = float(tracked_dets.confidence[det_idx])
+
+                        # ── 方向判斷：累積每幀車牌中心點 Y 座標 ─────────────────────
+                        # 每幀 ByteTrack 成功追蹤時（無論 OCR 是否通過）均記錄 center_y
+                        _center_y = (y1 + y2) // 2
+                        if cam_id not in track_y_history:
+                            track_y_history[cam_id] = {}
+                        if tracker_id not in track_y_history[cam_id]:
+                            track_y_history[cam_id][tracker_id] = []
+                        track_y_history[cam_id][tracker_id].append(_center_y)
 
                         cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
 
@@ -3109,6 +3153,7 @@ def main():
                             by_track[c.get("tracker_id", -1)].append(c)
 
                         plate_candidates[cam_id] = []  # Reset buffer
+                        track_y_history[cam_id]  = {}  # Reset direction history
 
                         # Init per-camera tracking dict
                         if cam_id not in tracked_by_id:
@@ -3150,6 +3195,10 @@ def main():
                             else:
                                 cleaned_plate = raw_best  # fallback
 
+                            # ── 方向判斷：由 Y 座標歷史計算 ENTER/EXIT ────────────
+                            y_hist    = track_y_history.get(cam_id, {}).get(tid, [])
+                            direction = compute_direction(y_hist)
+
                             ocr_conf      = best["ocr_conf"]
                             confidence_b  = best["yolo_conf"]
                             cropped_plate = best["cropped_plate"]
@@ -3160,7 +3209,7 @@ def main():
 
                             vote_note = f"voted='{voted_plate}'" if voted_plate != raw_best else "voted=same"
                             print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [BEST-PLATE] {cam_name}: "
-                                  f"tid={tid} '{cleaned_plate}' hist={len(all_ocr_history)} {vote_note} "
+                                  f"tid={tid} '{cleaned_plate}' hist={len(all_ocr_history)} {vote_note} dir={direction} "
                                   f"(YOLO={confidence_b:.2f} OCR={ocr_conf:.2f})")
 
                             # ── Duplicate check 1: ByteTrack tracker_id lookup ─
@@ -3248,9 +3297,9 @@ def main():
                             with db_write_lock:
                                 cursor  = db_conn_persistent.cursor()
                                 cursor.execute(
-                                    "INSERT INTO detections (plate_number, confidence, crop_image_path, full_image_path, vehicle_type, camera_id) "
-                                    "VALUES (?, ?, ?, ?, ?, ?)",
-                                    (cleaned_plate, round(ocr_conf, 2), crop_filename, full_filename, v_type, cam_id)
+                                    "INSERT INTO detections (plate_number, confidence, crop_image_path, full_image_path, vehicle_type, camera_id, direction) "
+                                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                    (cleaned_plate, round(ocr_conf, 2), crop_filename, full_filename, v_type, cam_id, direction)
                                 )
                                 detection_id = cursor.lastrowid
 
@@ -3288,6 +3337,7 @@ def main():
                     else:
                         # Trigger window closed but no valid candidates were accumulated
                         plate_candidates[cam_id] = []
+                        track_y_history[cam_id]  = {}
                         print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [BEST-PLATE] {cam_name}: trigger window closed with 0 valid candidates.")
 
                 # Post-YOLO display update: re-evaluate throttle condition.
