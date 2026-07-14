@@ -2159,15 +2159,22 @@ def main():
     except Exception as e:
         print(f"[SYSTEM] Could not limit PyTorch threads: {e}")
     
-    # Load PaddleOCR
-    # Note: det=False is not supported in this PaddleOCR version (raises ValueError).
-    # YOLO crop is tight enough that the detection stage overhead is acceptable.
-    # use_textline_orientation replaces deprecated use_angle_cls (plates are horizontal).
-    # text_recognition_batch_size replaces deprecated rec_batch_num.
-    print("Initializing PaddleOCR with enable_mkldnn=False...")
-    ocr = PaddleOCR(lang='en', enable_mkldnn=False, use_angle_cls=False,
-                    rec_batch_num=1)
-
+    # Load PaddleOCR (v3.x API)
+    # - use_doc_orientation_classify=False : skip PP-LCNet doc-orientation model (not needed for plates)
+    # - use_doc_unwarping=False            : skip UVDoc document-unwarping model (not needed for plates)
+    # - use_textline_orientation=False     : skip textline-orientation model (plates are horizontal)
+    # - text_recognition_batch_size=1      : replaces deprecated rec_batch_num
+    # Result: only 2 models loaded (PP-OCRv6_medium_det + PP-OCRv6_medium_rec)
+    # Note: det=False (skip detection stage) is not available in PaddleOCR v3.x API.
+    print("Initializing PaddleOCR v3.x (det+rec only, no doc preprocessor)...")
+    ocr = PaddleOCR(
+        lang='en',
+        enable_mkldnn=False,
+        use_doc_orientation_classify=False,
+        use_doc_unwarping=False,
+        use_textline_orientation=False,
+        text_recognition_batch_size=1,
+    )
 
     # ── 改進 8: Cache CLAHE object (created once, reused every frame) ─────────
     _clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
@@ -2634,12 +2641,13 @@ def main():
                         except Exception as e:
                             print(f"[SYSTEM] Sharpening failed: {e}")
 
-                        ocr_res = ocr.ocr(enhanced)
+                        # Call PaddleOCR predict (replaces deprecated ocr.ocr())
+                        ocr_res = ocr.predict(enhanced)
                         plate_text = ""
                         ocr_conf = 0.0
                         
                         if ocr_res and len(ocr_res) > 0:
-                            res_dict = ocr_res[0]
+                            res_dict = ocr_res[0]  # OCRResult dict-like object
                             texts = res_dict.get('rec_texts', [])
                             scores = res_dict.get('rec_scores', [])
                             plate_text = "".join(texts)
