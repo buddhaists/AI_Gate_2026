@@ -2424,7 +2424,9 @@ def main():
                 # For early-exit paths (paused / no-motion), only copy when do_display_update.
                 # For the YOLO path (has_motion + active), display_frame is always needed
                 # for bbox annotation, so it is created below after these checks.
-                display_h, display_w = 360, 640
+                do_display_update = (time.time() - last_display_update.get(cam_id, 0)) >= DISPLAY_UPDATE_INTERVAL
+                display_h, display_w = 360, 640  # P7: reduced from 960x540 to cut imencode CPU ~60%
+
 
                 def _make_display_frame():
                     """Create display_frame with gate indicator + zone polygon drawn."""
