@@ -2558,12 +2558,9 @@ def main():
                 # Pre-YOLO display update: push current frame to stream NOW, before
                 # the blocking model() call occupies CPU for ~200ms. This keeps the
                 # MJPEG stream showing a fresh frame instead of a stale frozen one.
+                # 改進 14: Use shared _encode_and_push() — display_w/display_h are DISPLAY_W/DISPLAY_H.
                 if do_display_update:
-                    display_small = cv2.resize(display_frame, (display_w, display_h))
-                    _, img_encoded = cv2.imencode('.jpg', display_small, [cv2.IMWRITE_JPEG_QUALITY, 65])
-                    with frame_lock:
-                        latest_display_frames[cam_id] = img_encoded.tobytes()
-                    last_display_update[cam_id] = time.time()
+                    _encode_and_push(display_frame, cam_id, last_display_update)
 
                 if run_lpr:
                     # Mask out the timestamp watermark in the bottom-right corner to prevent false detections
