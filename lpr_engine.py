@@ -2906,20 +2906,31 @@ def main():
                         if crop_w < 25 or crop_h < 10:
                             continue
 
+                        # ── 強化 PRE-1: Laplacian 模糊評分 ────────────────────────────────
+                        # 計算灰階 Laplacian 方差，低於閾值代表過度模糊，拒絕送 OCR
+                        # 節省 OCR 資源，避免模糊幀污染 ocr_history
+                        _gray_blur_check = cv2.cvtColor(cropped_plate, cv2.COLOR_BGR2GRAY)
+                        _lap_var = cv2.Laplacian(_gray_blur_check, cv2.CV_64F).var()
+                        BLUR_THRESHOLD = 30.0  # 低於此值 = 過度模糊，跳過
+                        if _lap_var < BLUR_THRESHOLD:
+                            continue  # 模糊幀，不送 OCR
+
+                        # 加入邊框（replicate 模式避免邊緣 artifact）
                         cropped_plate_padded = cv2.copyMakeBorder(
                             cropped_plate,
                             top=10, bottom=10, left=15, right=15,
                             borderType=cv2.BORDER_REPLICATE
                         )
 
-                        # Apply Image Enhancements for OCR accuracy:
-                        # A. Resize to a uniform height of 64px (maintaining aspect ratio)
-                        target_h = 64
+                        # ── 強化 PRE-2: 放大至 128px 高（原本 64px） ─────────────────────
+                        # 更高解析度有助於小字符（機車牌、遠距離）的 OCR 準確率
+                        target_h = 128  # 改進：128px（原本 64px）
                         ph, pw, _ = cropped_plate_padded.shape
                         target_w = int(pw * (target_h / ph))
-                        enhanced = cv2.resize(cropped_plate_padded, (target_w, target_h), interpolation=cv2.INTER_CUBIC)
-                        
-                        # B. Local Contrast Enhancement using CLAHE on Luminance channel
+                        enhanced = cv2.resize(cropped_plate_padded, (target_w, target_h),
+                                              interpolation=cv2.INTER_LANCZOS4)  # Lanczos > Cubic 於放大
+
+                        # ── 強化 PRE-3: CLAHE 對比度強化（亮度通道）────────────────────
                         # (改進 8: reuse cached _clahe object — no allocation per detection)
                         try:
                             ycrcb = cv2.cvtColor(enhanced, cv2.COLOR_BGR2YCrCb)
@@ -2929,16 +2940,36 @@ def main():
                             enhanced = cv2.cvtColor(ycrcb, cv2.COLOR_YCrCb2BGR)
                         except Exception as e:
                             print(f"[SYSTEM] CLAHE enhancement failed: {e}")
-                            
-                        # C. Sharpening using Unsharp Mask (Gaussian Blur subtraction)
+
+                        # ── 強化 PRE-4: Unsharp Mask 銳化 ────────────────────────────────
                         try:
                             blurred = cv2.GaussianBlur(enhanced, (3, 3), 0)
                             enhanced = cv2.addWeighted(enhanced, 1.5, blurred, -0.5, 0)
                         except Exception as e:
                             print(f"[SYSTEM] Sharpening failed: {e}")
 
+                        # ── 強化 PRE-5: 低對比度時啟用自適應二值化備援 ───────────────────
+                        # 強光/逆光場景下，車牌字符與背景對比度低（< 40）。
+                        # 此時以 CLAHE + Otsu 二值化後轉灰階 BGR，與彩色版各送 OCR，
+                        # 採用 ocr_conf 較高的結果。
+                        _gray_for_contrast = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
+                        _contrast = float(_gray_for_contrast.std())
+                        enhanced_binarized = None
+                        if _contrast < 40.0:
+                            try:
+                                # CLAHE 強化後 Otsu 二值化
+                                _clahe_tmp = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(4, 4))
+                                _y_bin = _clahe_tmp.apply(_gray_for_contrast)
+                                _, _bin = cv2.threshold(_y_bin, 0, 255,
+                                                        cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                                # 轉回 BGR 3 通道（PaddleOCR 期望彩色輸入）
+                                enhanced_binarized = cv2.cvtColor(_bin, cv2.COLOR_GRAY2BGR)
+                            except Exception as e:
+                                print(f"[SYSTEM] Binarize fallback failed: {e}")
+
                         # Call PaddleOCR predict (replaces deprecated ocr.ocr())
                         ocr_res = ocr.predict(enhanced)
+
                         plate_text = ""
                         ocr_conf = 0.0
                         
@@ -2951,7 +2982,29 @@ def main():
                             # recognition quality. max() was too easily gamed by a single
                             # high-confidence character in an otherwise blurry read.
                             ocr_conf = (sum(scores) / len(scores)) if scores else 0.0
+
+                        # ── 強化 PRE-5 比對：若二值化備援啟用，與彩色版比較取優 ──────────
+                        if enhanced_binarized is not None:
+                            try:
+                                ocr_res_bin = ocr.predict(enhanced_binarized)
+                                if ocr_res_bin and len(ocr_res_bin) > 0:
+                                    res_bin = ocr_res_bin[0]
+                                    texts_bin  = res_bin.get('rec_texts', [])
+                                    scores_bin = res_bin.get('rec_scores', [])
+                                    plate_text_bin = "".join(texts_bin)
+                                    ocr_conf_bin   = (sum(scores_bin) / len(scores_bin)) if scores_bin else 0.0
+                                    if ocr_conf_bin > ocr_conf:
+                                        # 二值化版本更佳，採用之
+                                        plate_text = plate_text_bin
+                                        ocr_conf   = ocr_conf_bin
+                                        print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+                                              f"[BINARIZE] contrast={_contrast:.1f} → bin OCR better "
+                                              f"({ocr_conf_bin:.2f} > {ocr_conf:.2f}) '{plate_text_bin}'")
+                            except Exception as _e:
+                                pass  # 二值化版失敗，沿用彩色版
+
                         cleaned_plate = clean_plate_text(plate_text)
+
                         
                         # Adaptive OCR confidence thresholds:
                         # - Plates matching TW motorcycle format (short, mixed) get a very low threshold (0.40)
