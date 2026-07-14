@@ -28,6 +28,7 @@ import re
 import json
 import urllib.parse
 import subprocess
+from collections import defaultdict, Counter  # moved from hot-path inline imports
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import TCPServer
 from ultralytics import YOLO
@@ -420,8 +421,11 @@ class RTSPVideoReader:
         self.thread = None
         self.offline_start_time = None
         self.alert_sent = False
+        self._skip_counter = 0           # init here, not inside hot read loop
+        self._offline_threshold_min = 5  # cached DB setting; refreshed on each offline tick
         # Clean local proxy URL managed by go2rtc
         self.proxy_url = f"rtsp://127.0.0.1:8554/camera{cam_id}"
+
 
     def start(self):
         self.running = True
@@ -437,19 +441,20 @@ class RTSPVideoReader:
             self.offline_start_time = time.time()
         else:
             duration = time.time() - self.offline_start_time
+            # Refresh cached threshold from DB on each offline tick (not every frame).
             try:
                 conn = sqlite3.connect(DB_PATH)
                 cursor = conn.cursor()
                 cursor.execute("SELECT value FROM settings WHERE key = 'offline_threshold_minutes'")
                 row = cursor.fetchone()
-                threshold_min = int(row[0]) if row else 5
+                self._offline_threshold_min = int(row[0]) if row else 5
                 conn.close()
             except Exception:
-                threshold_min = 5
-            
-            if duration >= threshold_min * 60 and not self.alert_sent:
+                pass  # keep previous cached value
+
+            if duration >= self._offline_threshold_min * 60 and not self.alert_sent:
                 self.alert_sent = True
-                alert_text = f"⚠️ [相機離線警報] ⚠️\n🎥 攝影機：{self.name} (ID: {self.cam_id})\n❌ 狀態：已失去連線超過 {threshold_min} 分鐘！\n請儘速檢查網路線路或攝影機電源。"
+                alert_text = f"⚠️ [相機離線警報] ⚠️\n🎥 攝影機：{self.name} (ID: {self.cam_id})\n❌ 狀態：已失去連線超過 {self._offline_threshold_min} 分鐘！\n請儘速檢查網路線路或攝影機電源。"
                 print(f"[SYSTEM] {alert_text}")
                 send_telegram_text_async(alert_text)
 
@@ -458,12 +463,11 @@ class RTSPVideoReader:
             print(f"Connecting to RTSP proxy for camera {self.name}...")
             current_url = self.url
             open_url = self.proxy_url
-            
-            import os
-            # Limit FFmpeg decoder to 1 thread per camera stream (down from 2).
-            # 1 thread is sufficient for 1080p H.264 at 10-15fps; frees 1 core per camera.
-            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|fflags;nobuffer|max_delay;500000|threads;1"
+
+            # OPENCV_FFMPEG_CAPTURE_OPTIONS already set at module startup via os.environ.
+            # Removed: import os + os.environ reassignment on every reconnect.
             with video_capture_lock:
+
                 self.cap = cv2.VideoCapture(open_url, cv2.CAP_FFMPEG)
             if not self.cap.isOpened():
                 print("Failed to open proxy stream, retrying...")
@@ -494,15 +498,13 @@ class RTSPVideoReader:
                     break
                 
                 # CPU OpenVINO Mode: Skip every other frame to target ~6fps effective processing.
-                # 80ms sleep reduces raw decode rate to ~12fps per camera.
-                # This keeps CPU usage low while remaining fast enough to catch motorcycles.
-                if not hasattr(self, '_skip_counter'):
-                    self._skip_counter = 0
+                # skip FIRST, sleep only for kept frames (saves 80ms per discarded frame).
                 self._skip_counter += 1
-                time.sleep(0.08)  # Limit decode to ~12 reads/sec per camera
                 if self._skip_counter % 2 == 0:
-                    continue  # Process 1 in 2 frames (effective ~6fps)
-                
+                    continue  # discard frame without sleeping
+
+                time.sleep(0.08)  # pace kept frames to ~6fps
+
                 # Keep only the latest frame in the queue
                 if self.q.full():
                     try:
@@ -612,7 +614,7 @@ def check_gate_closed(frame):
         # Check if it is monitoring start hours (05:00 to 22:00)
         # 早上 05:00 至晚上 22:00 自動啟動監控（大門強制判定為開啟 False，以防白天光影誤判）
         # 晚上 22:00 至隔天早上 05:00 自動關閉啟動（啟用實際大門關閉偵測，若關門則暫停監控）
-        import datetime
+        # datetime imported at module top — no inline import needed.
         now = datetime.datetime.now()
         current_time = now.time()
         day_start = datetime.time(5, 0)
@@ -2524,12 +2526,10 @@ def main():
                     if any_plates_detected:
                         last_plate_times[cam_id] = current_time
                     
-                    if cam_id not in tracked_vehicles:
-                        tracked_vehicles[cam_id] = []
                     if cam_id not in recently_logged_plates:
                         recently_logged_plates[cam_id] = {}
 
-                    tracked_vehicles[cam_id] = [v for v in tracked_vehicles[cam_id] if current_time - v["last_seen"] < STATIONARY_TIMEOUT]
+                    # tracked_vehicles always empty after ByteTrack replaced IoU tracker — cleanup removed.
                     recently_logged_plates[cam_id] = {k: v for k, v in recently_logged_plates[cam_id].items() if current_time - v < LOGGED_SUPPRESSION_TIMEOUT}
 
                     # ── Build supervision Detections for zone filtering ────────
@@ -2747,8 +2747,7 @@ def main():
                         # Each unique tracker_id = one physical vehicle.
                         # This allows multiple vehicles passing simultaneously
                         # to each get their own DB record.
-                        from collections import defaultdict
-                        by_track = defaultdict(list)
+                        by_track = defaultdict(list)  # defaultdict imported at module top
                         for c in candidates:
                             by_track[c.get("tracker_id", -1)].append(c)
 
@@ -2775,7 +2774,7 @@ def main():
                         # 改進 9: Multi-candidate voting — plates seen more often across
                         # frames get a +0.15 bonus per extra occurrence, so a consistently
                         # read string beats a single lucky high-confidence misread.
-                        from collections import Counter
+                        # Counter imported at module top.
                         for tid, track_cands in by_track.items():
                             vote_counts = Counter(c["plate"] for c in track_cands)
                             for c in track_cands:
