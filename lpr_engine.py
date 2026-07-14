@@ -531,9 +531,17 @@ class RTSPVideoReader:
     def stop(self):
         self.running = False
 
+# ── Module-level constants for clean_plate_text (改進 7) ─────────────────────
+# Moved out of function body so they are created once, not on every OCR call.
+_PLATE_RE        = re.compile(r'[^A-Za-z0-9]')
+_DIGIT_TO_LETTER = {'0': 'O', '1': 'I', '2': 'Z', '5': 'S', '6': 'G', '8': 'B'}
+_LETTER_TO_DIGIT = {'O': '0', 'D': '0', 'Q': '0', 'I': '1', 'L': '1', 'J': '1',
+                    'Z': '2', 'S': '5', 'B': '8', 'G': '6', 'T': '7', 'Y': '7', 'A': '4'}
+_FORMAT_SPLITS   = {5: 2, 6: 3, 7: 3, 8: 4}
+
 # Clean up recognized plate text to standard format (Alphanumeric uppercase, no hyphens)
 def clean_plate_text(text):
-    cleaned = re.sub(r'[^A-Za-z0-9]', '', text).upper()
+    cleaned = _PLATE_RE.sub('', text).upper()
 
     # ── Improvement 2: Enhanced position-based character correction ──────────
     # Taiwan license plate formats and their split points:
@@ -543,23 +551,18 @@ def clean_plate_text(text):
     #   8-char: 4L + 4D  (e.g. ABCD-1234)→ split=4  (electric scooter)
     # In the letter-zone, digits that look like letters are corrected to letters.
     # In the digit-zone, letters that look like digits are corrected to digits.
-    DIGIT_TO_LETTER = {'0': 'O', '1': 'I', '2': 'Z', '5': 'S', '6': 'G', '8': 'B'}
-    LETTER_TO_DIGIT = {'O': '0', 'D': '0', 'Q': '0', 'I': '1', 'L': '1', 'J': '1',
-                       'Z': '2', 'S': '5', 'B': '8', 'G': '6', 'T': '7', 'Y': '7', 'A': '4'}
-
-    FORMAT_SPLITS = {5: 2, 6: 3, 7: 3, 8: 4}
-    if len(cleaned) in FORMAT_SPLITS:
-        split = FORMAT_SPLITS[len(cleaned)]
+    if len(cleaned) in _FORMAT_SPLITS:
+        split = _FORMAT_SPLITS[len(cleaned)]
         prefix = cleaned[:split]
         suffix = cleaned[split:]
 
         # Only apply if the prefix 'looks like' a letter zone and suffix 'looks like' a digit zone
-        letter_zone_score = sum(c.isalpha() or c in DIGIT_TO_LETTER for c in prefix)
-        digit_zone_score  = sum(c.isdigit() or c in LETTER_TO_DIGIT for c in suffix)
+        letter_zone_score = sum(c.isalpha() or c in _DIGIT_TO_LETTER for c in prefix)
+        digit_zone_score  = sum(c.isdigit() or c in _LETTER_TO_DIGIT for c in suffix)
 
         if letter_zone_score >= split - 1 and digit_zone_score >= len(suffix) - 1:
-            corrected = [DIGIT_TO_LETTER.get(c, c) for c in prefix] + \
-                        [LETTER_TO_DIGIT.get(c, c) for c in suffix]
+            corrected = [_DIGIT_TO_LETTER.get(c, c) for c in prefix] + \
+                        [_LETTER_TO_DIGIT.get(c, c) for c in suffix]
             cleaned = "".join(corrected)
 
     return cleaned
@@ -2157,8 +2160,14 @@ def main():
         print(f"[SYSTEM] Could not limit PyTorch threads: {e}")
     
     # Load PaddleOCR
-    print("Initializing PaddleOCR with enable_mkldnn=False...")
-    ocr = PaddleOCR(lang='en', enable_mkldnn=False, use_angle_cls=False, rec_batch_num=1)
+    # det=False: YOLO already locates the plate; skip the text-detection stage
+    # (~50-100ms saved per call). use_angle_cls=False: plates are always horizontal.
+    print("Initializing PaddleOCR with enable_mkldnn=False, det=False...")
+    ocr = PaddleOCR(lang='en', enable_mkldnn=False, use_angle_cls=False,
+                    rec_batch_num=1, det=False)
+
+    # ── 改進 8: Cache CLAHE object (created once, reused every frame) ─────────
+    _clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
     # Start all active RTSP readers from database
     sync_active_readers()
@@ -2474,19 +2483,24 @@ def main():
                     h, w, _ = detection_frame.shape
                     detection_frame[int(h*0.9):h, int(w*0.7):w] = 0
                     
-                    # Crop to the active ROI area before passing to YOLO to speed up inference and ignore background pixels
+                    # ── 改進 6: YOLO ROI derived from PolygonZone bounding box ──
+                    # Dynamically crop to the polygon's bounding box (+ 5% margin)
+                    # instead of hardcoded camera-name branches.
+                    # Smaller YOLO input → faster inference (27ms → ~15ms when zone
+                    # covers ~50% of frame area).
                     crop_y1, crop_y2, crop_x1, crop_x2 = 0, h, 0, w
-                    if cam_name == "學校大門":
-                        crop_y1 = max(0, int(0.05 * h))
-                        crop_y2 = min(h, int(0.95 * h))
-                        crop_x1 = max(0, int(0.02 * w))
-                        crop_x2 = min(w, int(0.98 * w))
-                    elif cam_name == "學校大門002":
-                        crop_y1 = max(0, int(0.05 * h))
-                        crop_y2 = min(h, int(0.95 * h))
-                        crop_x1 = max(0, int(0.02 * w))
-                        crop_x2 = min(w, int(0.98 * w))
-                    
+                    _zone_poly = GATE_ZONE_POLYGONS.get(cam_id)
+                    if _zone_poly is not None and len(_zone_poly) > 0:
+                        _margin = 0.05
+                        _x_min = int(_zone_poly[:, 0].min())
+                        _y_min = int(_zone_poly[:, 1].min())
+                        _x_max = int(_zone_poly[:, 0].max())
+                        _y_max = int(_zone_poly[:, 1].max())
+                        crop_x1 = max(0, int(_x_min * (1 - _margin)))
+                        crop_y1 = max(0, int(_y_min * (1 - _margin)))
+                        crop_x2 = min(w, int(_x_max * (1 + _margin)))
+                        crop_y2 = min(h, int(_y_max * (1 + _margin)))
+
                     yolo_input = detection_frame[crop_y1:crop_y2, crop_x1:crop_x2]
                     results = model(yolo_input, conf=0.15, imgsz=640, verbose=False)
                     current_time = time.time()
@@ -2600,11 +2614,11 @@ def main():
                         enhanced = cv2.resize(cropped_plate_padded, (target_w, target_h), interpolation=cv2.INTER_CUBIC)
                         
                         # B. Local Contrast Enhancement using CLAHE on Luminance channel
+                        # (改進 8: reuse cached _clahe object — no allocation per detection)
                         try:
                             ycrcb = cv2.cvtColor(enhanced, cv2.COLOR_BGR2YCrCb)
                             y_channel, cr, cb = cv2.split(ycrcb)
-                            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-                            y_channel = clahe.apply(y_channel)
+                            y_channel = _clahe.apply(y_channel)
                             ycrcb = cv2.merge([y_channel, cr, cb])
                             enhanced = cv2.cvtColor(ycrcb, cv2.COLOR_YCrCb2BGR)
                         except Exception as e:
@@ -2626,7 +2640,10 @@ def main():
                             texts = res_dict.get('rec_texts', [])
                             scores = res_dict.get('rec_scores', [])
                             plate_text = "".join(texts)
-                            ocr_conf = max(scores) if scores else 0.0
+                            # 改進 10: Use MEAN score (not max) to reflect full-plate
+                            # recognition quality. max() was too easily gamed by a single
+                            # high-confidence character in an otherwise blurry read.
+                            ocr_conf = (sum(scores) / len(scores)) if scores else 0.0
                         cleaned_plate = clean_plate_text(plate_text)
                         
                         # Adaptive OCR confidence thresholds:
@@ -2744,7 +2761,14 @@ def main():
                         }
 
                         # ── Per tracker_id: commit best candidate ─────────────
+                        # 改進 9: Multi-candidate voting — plates seen more often across
+                        # frames get a +0.15 bonus per extra occurrence, so a consistently
+                        # read string beats a single lucky high-confidence misread.
+                        from collections import Counter
                         for tid, track_cands in by_track.items():
+                            vote_counts = Counter(c["plate"] for c in track_cands)
+                            for c in track_cands:
+                                c["combined"] += vote_counts[c["plate"]] * 0.15
                             best = max(track_cands, key=lambda c: c["combined"])
                             cleaned_plate = best["plate"]
                             ocr_conf      = best["ocr_conf"]
