@@ -3051,8 +3051,8 @@ def main():
     # - use_doc_unwarping=False            : skip UVDoc document-unwarping model (not needed for plates)
     # - use_textline_orientation=False     : skip textline-orientation model (plates are horizontal)
     # - text_recognition_batch_size=1      : replaces deprecated rec_batch_num
+    # - text_det_score_thresh=0.5          : 提高 det 過濾門檻（預設 ~0.3），減少小圖雜訊 box
     # Result: only 2 models loaded (PP-OCRv6_medium_det + PP-OCRv6_medium_rec)
-    # Note: det=False (skip detection stage) is not available in PaddleOCR v3.x API.
     print("Initializing PaddleOCR v3.x (det+rec only, no doc preprocessor)...")
     ocr = PaddleOCR(
         lang='en',
@@ -3061,6 +3061,7 @@ def main():
         use_doc_unwarping=False,
         use_textline_orientation=False,
         text_recognition_batch_size=1,
+        text_det_score_thresh=0.5,
     )
 
     # ── 改進 8: Cache CLAHE object (created once, reused every frame) ─────────
@@ -3588,39 +3589,70 @@ def main():
                             except Exception as e:
                                 print(f"[SYSTEM] Binarize fallback failed: {e}")
 
-                        # Call PaddleOCR predict (replaces deprecated ocr.ocr())
-                        ocr_res = ocr.predict(enhanced)
+                        # ── 改進: _parse_ocr_result 過濾 det 雜訊 ──────────────────────
+                        # PaddleOCR det 在小圖（128px）上容易偵測到多個碎片框（雜訊）。
+                        # 解法：
+                        #   1. 用 dt_polys 計算每個 box 面積，過濾面積 < 圖面積 2% 的雜訊框
+                        #   2. 依 box 左上角 x 座標排序（確保左→右拼接）
+                        #   3. 合併剩餘 box 的文字與信心值
+                        def _parse_ocr_result(res, img):
+                            """從 PaddleOCR v3.x predict() 結果中過濾雜訊 box 並回傳 (text, conf)。"""
+                            if not res or len(res) == 0:
+                                return '', 0.0
+                            res_dict = res[0]
+                            texts   = res_dict.get('rec_texts', [])
+                            scores  = res_dict.get('rec_scores', [])
+                            polys   = res_dict.get('dt_polys', [])
 
-                        plate_text = ""
-                        ocr_conf = 0.0
-                        
-                        if ocr_res and len(ocr_res) > 0:
-                            res_dict = ocr_res[0]  # OCRResult dict-like object
-                            texts = res_dict.get('rec_texts', [])
-                            scores = res_dict.get('rec_scores', [])
-                            plate_text = "".join(texts)
-                            # 改進 10: Use MEAN score (not max) to reflect full-plate
-                            # recognition quality. max() was too easily gamed by a single
-                            # high-confidence character in an otherwise blurry read.
-                            ocr_conf = (sum(scores) / len(scores)) if scores else 0.0
+                            if not texts:
+                                return '', 0.0
+
+                            img_area = img.shape[0] * img.shape[1]  # H * W
+                            MIN_BOX_AREA_RATIO = 0.02  # box 面積需 >= 圖面積 2%
+
+                            # 建立 (x_min, text, score) 列表，依 x_min 排序
+                            items = []
+                            for i, txt in enumerate(texts):
+                                sc = scores[i] if i < len(scores) else 0.0
+                                if i < len(polys) and polys[i] is not None:
+                                    pts = np.array(polys[i])
+                                    # 計算 bounding box 面積（shoelace 公式 or 簡單 bbox）
+                                    box_w = float(pts[:, 0].max() - pts[:, 0].min())
+                                    box_h = float(pts[:, 1].max() - pts[:, 1].min())
+                                    box_area = box_w * box_h
+                                    if box_area < img_area * MIN_BOX_AREA_RATIO:
+                                        continue  # 過濾雜訊 box
+                                    x_min = float(pts[:, 0].min())
+                                else:
+                                    x_min = float(i)  # fallback: 依原始順序
+                                items.append((x_min, txt, sc))
+
+                            if not items:
+                                # 若全被過濾，退回原始結果（不拋棄）
+                                joined = ''.join(texts)
+                                conf   = (sum(scores) / len(scores)) if scores else 0.0
+                                return joined, conf
+
+                            items.sort(key=lambda t: t[0])  # 左→右排序
+                            joined = ''.join(t[1] for t in items)
+                            conf   = sum(t[2] for t in items) / len(items)
+                            return joined, conf
+
+                        # Call PaddleOCR predict
+                        ocr_res = ocr.predict(enhanced)
+                        plate_text, ocr_conf = _parse_ocr_result(ocr_res, enhanced)
 
                         # ── 強化 PRE-5 比對：若二值化備援啟用，與彩色版比較取優 ──────────
                         if enhanced_binarized is not None:
                             try:
                                 ocr_res_bin = ocr.predict(enhanced_binarized)
-                                if ocr_res_bin and len(ocr_res_bin) > 0:
-                                    res_bin = ocr_res_bin[0]
-                                    texts_bin  = res_bin.get('rec_texts', [])
-                                    scores_bin = res_bin.get('rec_scores', [])
-                                    plate_text_bin = "".join(texts_bin)
-                                    ocr_conf_bin   = (sum(scores_bin) / len(scores_bin)) if scores_bin else 0.0
-                                    if ocr_conf_bin > ocr_conf:
-                                        # 二值化版本更佳，採用之
-                                        plate_text = plate_text_bin
-                                        ocr_conf   = ocr_conf_bin
-                                        print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-                                              f"[BINARIZE] contrast={_contrast:.1f} → bin OCR better "
-                                              f"({ocr_conf_bin:.2f} > {ocr_conf:.2f}) '{plate_text_bin}'")
+                                plate_text_bin, ocr_conf_bin = _parse_ocr_result(ocr_res_bin, enhanced_binarized)
+                                if ocr_conf_bin > ocr_conf:
+                                    plate_text = plate_text_bin
+                                    ocr_conf   = ocr_conf_bin
+                                    print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+                                          f"[BINARIZE] contrast={_contrast:.1f} -> bin OCR better "
+                                          f"({ocr_conf_bin:.2f} > {ocr_conf:.2f}) '{plate_text_bin}'")
                             except Exception as _e:
                                 pass  # 二值化版失敗，沿用彩色版
 
