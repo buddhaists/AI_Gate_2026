@@ -53,6 +53,11 @@ latest_display_frames = {} # Key: camera_id (int), Value: JPEG bytes (compressed
 frame_lock = threading.Lock()
 video_capture_lock = threading.Lock()
 readers_lock = threading.Lock()  # Guards active_readers dict across threads
+# 改進 11: Module-level persistent DB connection (initialized in main()).
+# Declared here so sync_active_readers() (module-level) can reuse it without
+# opening a new sqlite3 connection on every call (~every 30 s).
+db_conn_persistent = None
+db_write_lock = threading.Lock()
 
 # Background image save queue — offloads cv2.imwrite from the main detection loop
 _image_save_queue = queue.Queue(maxsize=64)
@@ -198,18 +203,21 @@ def init_db():
     except sqlite3.OperationalError:
         pass
         
-    # Retroactively classify existing plates (bidirectional migration)
-    cursor.execute("SELECT id, plate_number, vehicle_type FROM detections")
-    existing_rows = cursor.fetchall()
-    updates = []
-    for row_id, plate, current_type in existing_rows:
-        v_type = classify_vehicle_type(plate)
-        if v_type != current_type:
-            updates.append((v_type, row_id))
-    if updates:
+    # 改進 6: Only classify detections where vehicle_type is missing/unknown.
+    # Previous: SELECT * loads every row on every startup (slow at scale).
+    # Now: only rows that genuinely need updating are fetched.
+    # After first run, this query returns 0 rows and completes instantly.
+    cursor.execute("""
+        SELECT id, plate_number FROM detections
+        WHERE vehicle_type IS NULL OR vehicle_type = '' OR vehicle_type = 'UNKNOWN'
+    """)
+    rows_to_fix = cursor.fetchall()
+    if rows_to_fix:
+        updates = [(classify_vehicle_type(plate), row_id) for row_id, plate in rows_to_fix]
         cursor.executemany("UPDATE detections SET vehicle_type = ? WHERE id = ?", updates)
         conn.commit()
-        print(f"Retroactively updated classification for {len(updates)} detections.")
+        print(f"Retroactively classified {len(updates)} detections.")
+
  
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS watchlist (
@@ -370,8 +378,18 @@ def start_go2rtc():
             stdout=log_file,
             stderr=subprocess.STDOUT
         )
-        time.sleep(2.0)
-        print("[SYSTEM] go2rtc started successfully.")
+        # 改進 10: Poll go2rtc API for readiness instead of fixed sleep(2.0).
+        # go2rtc is typically ready in 0.3–0.8s; max wait 3s (30 × 100ms).
+        _ready = False
+        for _ in range(30):
+            time.sleep(0.1)
+            try:
+                urllib.request.urlopen("http://127.0.0.1:1984/api", timeout=0.3)
+                _ready = True
+                break
+            except Exception:
+                continue
+        print("[SYSTEM] go2rtc started successfully." if _ready else "[SYSTEM] go2rtc started (readiness timeout, proceeding anyway).")
     except Exception as e:
         print(f"[SYSTEM] Failed to start go2rtc: {e}")
 
@@ -391,11 +409,19 @@ def stop_go2rtc():
 
 def sync_active_readers():
     global active_readers, active_camera_names, last_active_cameras_cache
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, name, rtsp_url FROM cameras WHERE is_active = 1")
-    active_cameras = cursor.fetchall()
-    conn.close()
+    # 改進 11: Reuse db_conn_persistent (check_same_thread=False) instead of
+    # opening a new sqlite3 connection on every sync call (~every 30s).
+    try:
+        cursor = db_conn_persistent.cursor()
+        cursor.execute("SELECT id, name, rtsp_url FROM cameras WHERE is_active = 1")
+        active_cameras = cursor.fetchall()
+    except Exception:
+        # Fallback: open a fresh connection if persistent one is unavailable
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, name, rtsp_url FROM cameras WHERE is_active = 1")
+        active_cameras = cursor.fetchall()
+        conn.close()
 
     # Detect modifications to active cameras
     current_cache = {r[0]: sanitize_rtsp_url(r[2]) for r in active_cameras}
@@ -2241,11 +2267,14 @@ def main():
 
     # Persistent SQLite connection with WAL mode for lower per-commit overhead.
     # All DB writes in the main loop use this connection + db_write_lock.
+    # 改進 11: Declared global so sync_active_readers() (module-level) can reuse it.
+    global db_conn_persistent, db_write_lock
     db_conn_persistent = sqlite3.connect(DB_PATH, check_same_thread=False)
     db_conn_persistent.execute("PRAGMA journal_mode=WAL")
     db_conn_persistent.execute("PRAGMA synchronous=NORMAL")
     db_conn_persistent.execute("PRAGMA cache_size=-8000")  # 8MB page cache
-    db_write_lock = threading.Lock()
+    # db_write_lock already declared at module level; global statement above ensures
+    # any re-assignment here updates the same object referenced by other functions.
 
     print("AI LPR Engine started successfully. Monitoring stream...")
     
@@ -2304,6 +2333,7 @@ def main():
             if not has_gate_camera and manual_override is None:
                 system_enabled = True
 
+            _loop_start = time.time()  # 改進 7: track loop duration for sleep budgeting
             processed_any = False
             with readers_lock:
                 cam_ids = list(active_readers.keys())
@@ -2537,7 +2567,14 @@ def main():
                     # 改進 3: conf=0.25 (was 0.15) filters low-quality detections before OCR.
                     # iou=0.45 (was default 0.7) more aggressively suppresses overlapping
                     # boxes — license plates are compact, duplicate boxes are noise.
-                    results = model(yolo_input, conf=0.25, iou=0.45, imgsz=640, verbose=False)
+                    # 改進 5: Dynamic imgsz from crop dimensions.
+                    # YOLO resizes input to imgsz on its longest side. Since we now crop
+                    # to the PolygonZone bbox, the ROI is often <50% of the full frame.
+                    # Using a smaller imgsz reduces inference time proportionally.
+                    # Align to nearest multiple of 32 (YOLO requirement), clamp 320–640.
+                    _crop_long = max(crop_x2 - crop_x1, crop_y2 - crop_y1)
+                    _imgsz = max(320, min(640, (_crop_long // 32) * 32))
+                    results = model(yolo_input, conf=0.25, iou=0.45, imgsz=_imgsz, verbose=False)
                     current_time = time.time()
                     
                     # Check if any plates were found (result boxes are relative to cropped image)
@@ -2866,9 +2903,13 @@ def main():
                                     recently_logged_plates[cam_id][cleaned_plate] = current_time
 
                             # ── Duplicate check 2: string similarity fallback ──
+                            # 改進 8: Also verify the matched entry is still within
+                            # LOGGED_SUPPRESSION_TIMEOUT — cleanup only runs per trigger
+                            # window, so stale entries may linger briefly between cleanups.
                             if not is_duplicate:
-                                for logged_plate in recently_logged_plates[cam_id]:
-                                    if is_similar_plate(cleaned_plate, logged_plate):
+                                for logged_plate, logged_time in recently_logged_plates[cam_id].items():
+                                    if (current_time - logged_time) < LOGGED_SUPPRESSION_TIMEOUT \
+                                            and is_similar_plate(cleaned_plate, logged_plate):
                                         is_duplicate = True
                                         recently_logged_plates[cam_id][logged_plate] = current_time
                                         break
@@ -2949,10 +2990,14 @@ def main():
                         latest_display_frames[cam_id] = img_encoded.tobytes()
                     last_display_update[cam_id] = time.time()
 
-            if not processed_any:
-                time.sleep(0.03)
-            else:
-                time.sleep(0.02)  # ~50fps loop cap; actual per-camera rate limited by RTSP
+            # 改進 7: Budget-aware sleep — only sleep remaining time in the budget window.
+            # When YOLO runs (~200ms), budget is already exceeded → no sleep needed.
+            # When only motion detection runs (~3ms), we sleep the remaining ~17ms.
+            _loop_elapsed = time.time() - _loop_start
+            _budget = 0.03 if not processed_any else 0.02
+            _remaining = _budget - _loop_elapsed
+            if _remaining > 0.002:   # Only sleep if > 2ms remaining (worth the syscall)
+                time.sleep(_remaining)
 
     except KeyboardInterrupt:
         print("LPR Engine stopping...")
