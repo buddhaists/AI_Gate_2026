@@ -1143,36 +1143,78 @@ class RTSPVideoReader:
 # ── Module-level constants for clean_plate_text (改進 7) ─────────────────────
 # Moved out of function body so they are created once, not on every OCR call.
 _PLATE_RE        = re.compile(r'[^A-Za-z0-9]')
-_DIGIT_TO_LETTER = {'0': 'O', '1': 'I', '2': 'Z', '5': 'S', '6': 'G', '8': 'B'}
-_LETTER_TO_DIGIT = {'O': '0', 'D': '0', 'Q': '0', 'I': '1', 'L': '1', 'J': '1',
-                    'Z': '2', 'S': '5', 'B': '8', 'G': '6', 'T': '7', 'Y': '7', 'A': '4'}
-_FORMAT_SPLITS   = {5: 2, 6: 3, 7: 3, 8: 4}
+
+# 台灣車牌不使用 I 和 O（官方字母集排除，避免與 1/0 混淆）
+# 字母區：數字被誤認為字母時的修正表（數字 → 字母）
+_DIGIT_TO_LETTER = {
+    '0': 'O',  # 不會出現在字母區（台灣牌不用O，但此條目供格式評分使用）
+    '1': 'I',  # 同上
+    '2': 'Z',
+    '4': 'A',
+    '5': 'S',
+    '6': 'G',
+    '8': 'B',
+    '9': 'P',
+}
+
+# 數字區：字母被誤認為數字時的修正表（字母 → 數字）
+_LETTER_TO_DIGIT = {
+    'O': '0', 'D': '0', 'Q': '0',           # 形似 0
+    'I': '1', 'L': '1', 'J': '1',           # 形似 1
+    'Z': '2',                                # 形似 2
+    'A': '4',                                # 形似 4
+    'S': '5',                                # 形似 5
+    'G': '6',                                # 形似 6
+    'T': '7', 'Y': '7',                      # 形似 7
+    'B': '8',                                # 形似 8
+    'P': '9', 'R': '9',                      # 形似 9
+}
+
+# 台灣車牌合法字母（官方排除 I / O 避免混淆）
+_TW_VALID_LETTERS = set('ABCDEFGHJKLMNPQRSTUVWXYZ')
+
+# 各長度格式的字母/數字分割點
+# 4-char: 2L+2D (新式 e.g. KA-12)
+# 5-char: 2L+3D (e.g. AB-123)
+# 6-char: 3L+3D (e.g. ABC-123)
+# 7-char: 3L+4D (e.g. ABC-1234)
+# 8-char: 4L+4D (e.g. ABCD-1234, 電動車)
+_FORMAT_SPLITS   = {4: 2, 5: 2, 6: 3, 7: 3, 8: 4}
 
 # Clean up recognized plate text to standard format (Alphanumeric uppercase, no hyphens)
 def clean_plate_text(text):
+    """清理 OCR 輸出：去除雜訊字符、大寫化、依位置修正易混淆字符。
+
+    台灣車牌規則：
+    - 字母區：不含 I / O（官方排除），數字誤認時轉換回字母
+    - 數字區：字母誤認時轉換回數字
+    - 常見誤判：O↔0, I↔1, S↔5, Z↔2, B↔8, G↔6, A↔4, P↔9
+    """
     cleaned = _PLATE_RE.sub('', text).upper()
 
-    # ── Improvement 2: Enhanced position-based character correction ──────────
-    # Taiwan license plate formats and their split points:
-    #   5-char: 2L + 3D  (e.g. AB-123)   → split=2
-    #   6-char: 3L + 3D  (e.g. ABC-123)  → split=3
-    #   7-char: 3L + 4D  (e.g. ABC-1234) → split=3
-    #   8-char: 4L + 4D  (e.g. ABCD-1234)→ split=4  (electric scooter)
-    # In the letter-zone, digits that look like letters are corrected to letters.
-    # In the digit-zone, letters that look like digits are corrected to digits.
     if len(cleaned) in _FORMAT_SPLITS:
         split = _FORMAT_SPLITS[len(cleaned)]
-        prefix = cleaned[:split]
-        suffix = cleaned[split:]
+        prefix = cleaned[:split]   # 字母區
+        suffix = cleaned[split:]   # 數字區
 
-        # Only apply if the prefix 'looks like' a letter zone and suffix 'looks like' a digit zone
+        # 評分：檢查前後區是否符合預期（允許 1 個字符不符）
         letter_zone_score = sum(c.isalpha() or c in _DIGIT_TO_LETTER for c in prefix)
         digit_zone_score  = sum(c.isdigit() or c in _LETTER_TO_DIGIT for c in suffix)
 
         if letter_zone_score >= split - 1 and digit_zone_score >= len(suffix) - 1:
-            corrected = [_DIGIT_TO_LETTER.get(c, c) for c in prefix] + \
-                        [_LETTER_TO_DIGIT.get(c, c) for c in suffix]
-            cleaned = "".join(corrected)
+            # 字母區：數字轉字母；數字區：字母轉數字
+            corrected_prefix = [_DIGIT_TO_LETTER.get(c, c) for c in prefix]
+            corrected_suffix = [_LETTER_TO_DIGIT.get(c, c) for c in suffix]
+
+            # 字母區額外過濾：台灣車牌不含 I 和 O
+            # I → 最接近的合法字母（通常 OCR 把 J 誤讀為 I）
+            corrected_prefix = [
+                'J' if c == 'I' else
+                'Q' if c == 'O' else c
+                for c in corrected_prefix
+            ]
+
+            cleaned = ''.join(corrected_prefix + corrected_suffix)
 
     return cleaned
 
