@@ -1844,30 +1844,68 @@ async function saveMaintenanceSettings(event) {
     }
 }
 
-// ── Email 報表設定 ────────────────────────────────────────────────────────────
+// ── Email 報表設定（收件人優先設計）────────────────────────────────────────────
+
+// 設定今天日期作為預設值
+document.addEventListener('DOMContentLoaded', () => {
+    const d = document.getElementById('report-date');
+    if (d && !d.value) d.value = new Date().toISOString().slice(0, 10);
+});
+
 async function loadEmailSettings() {
     try {
         const res  = await fetch('/api/settings/email');
         if (!res.ok) return;
         const data = await res.json();
-        document.getElementById('email-enabled').checked = data.email_enabled === '1';
-        document.getElementById('email-smtp-host').value = data.email_smtp_host || '';
-        document.getElementById('email-smtp-port').value = data.email_smtp_port || '587';
-        document.getElementById('email-smtp-user').value = data.email_smtp_user || '';
-        document.getElementById('email-smtp-pass').value = data.email_smtp_pass || '';
-        document.getElementById('email-recipient').value = data.email_recipient  || '';
+
+        // 填寫 SMTP 進階設定欄位
+        const enabledEl = document.getElementById('email-enabled');
+        const hostEl    = document.getElementById('email-smtp-host');
+        const portEl    = document.getElementById('email-smtp-port');
+        const userEl    = document.getElementById('email-smtp-user');
+        const passEl    = document.getElementById('email-smtp-pass');
+        const recipEl   = document.getElementById('email-recipient');
+
+        if (enabledEl) enabledEl.checked = data.email_enabled === '1';
+        if (hostEl)    hostEl.value      = data.email_smtp_host || 'smtp.gmail.com';
+        if (portEl)    portEl.value      = data.email_smtp_port || '587';
+        if (userEl)    userEl.value      = data.email_smtp_user || '';
+        if (passEl)    passEl.value      = data.email_smtp_pass || '';
+        if (recipEl)   recipEl.value     = data.email_recipient  || '';
+
+        // 更新 SMTP 狀態指示器
+        _updateSmtpStatus(data);
     } catch (err) { console.error('Load email settings error:', err); }
+}
+
+function _updateSmtpStatus(data) {
+    const bar  = document.getElementById('smtp-status-bar');
+    const text = document.getElementById('smtp-status-text');
+    if (!bar || !text) return;
+    const configured = !!(data.email_smtp_host && data.email_smtp_user && data.email_smtp_pass);
+    if (configured) {
+        bar.style.background = 'rgba(34,197,94,0.08)';
+        bar.style.border     = '1px solid rgba(34,197,94,0.2)';
+        text.innerHTML = `<i class="fa-solid fa-circle-check" style="color:#22c55e;margin-right:6px;"></i>
+            寄件帳號：<strong style="color:#22c55e;">${data.email_smtp_user}</strong>
+            &nbsp;✓ 設定完成，填入收件人即可發送`;
+    } else {
+        bar.style.background = 'rgba(249,115,22,0.08)';
+        bar.style.border     = '1px solid rgba(249,115,22,0.2)';
+        text.innerHTML = `<i class="fa-solid fa-triangle-exclamation" style="color:#f97316;margin-right:6px;"></i>
+            尚未設定 SMTP 寄件帳號，請展開下方「進階 SMTP 設定」完成一次性設定。`;
+    }
 }
 
 async function saveEmailSettings(event) {
     event.preventDefault();
     const payload = {
-        email_enabled:   document.getElementById('email-enabled').checked ? '1' : '0',
-        email_smtp_host: document.getElementById('email-smtp-host').value.trim(),
-        email_smtp_port: document.getElementById('email-smtp-port').value.trim(),
-        email_smtp_user: document.getElementById('email-smtp-user').value.trim(),
-        email_smtp_pass: document.getElementById('email-smtp-pass').value.trim(),
-        email_recipient: document.getElementById('email-recipient').value.trim(),
+        email_enabled:   (document.getElementById('email-enabled')?.checked) ? '1' : '0',
+        email_smtp_host: document.getElementById('email-smtp-host')?.value.trim() || '',
+        email_smtp_port: document.getElementById('email-smtp-port')?.value.trim() || '587',
+        email_smtp_user: document.getElementById('email-smtp-user')?.value.trim() || '',
+        email_smtp_pass: document.getElementById('email-smtp-pass')?.value.trim() || '',
+        email_recipient: document.getElementById('email-recipient')?.value.trim() || '',
     };
     try {
         const res    = await fetch('/api/settings/email/save', {
@@ -1875,32 +1913,82 @@ async function saveEmailSettings(event) {
             body: JSON.stringify(payload)
         });
         const result = await res.json();
-        showToast(result.success ? 'Email 報表設定已儲存！' : '儲存失敗：' + result.error,
-                  result.success ? 'success' : 'error');
+        if (result.success) {
+            showToast('✅ SMTP 設定已儲存！', 'success');
+            _updateSmtpStatus(payload);  // 即時更新狀態列
+        } else {
+            showToast('❌ 儲存失敗：' + result.error, 'error');
+        }
     } catch { showToast('連線失敗', 'error'); }
 }
 
+// 即時自動儲存「啟用排程」開關
+async function saveEmailEnabled(checkbox) {
+    try {
+        await fetch('/api/settings/email/save', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email_enabled: checkbox.checked ? '1' : '0' })
+        });
+        showToast(checkbox.checked ? '✅ 每日自動發送已啟用' : '已關閉自動發送', 'success');
+    } catch { showToast('儲存失敗', 'error'); }
+}
+
+// 顯示/隱藏密碼切換
+function togglePassVis() {
+    const inp = document.getElementById('email-smtp-pass');
+    const ico = document.getElementById('pass-eye');
+    if (!inp) return;
+    if (inp.type === 'password') {
+        inp.type = 'text';
+        if (ico) ico.className = 'fa-solid fa-eye-slash';
+    } else {
+        inp.type = 'password';
+        if (ico) ico.className = 'fa-solid fa-eye';
+    }
+}
+
 async function downloadReport() {
-    const d   = document.getElementById('report-date');
-    const date = d ? d.value : new Date().toISOString().slice(0,10);
+    const d    = document.getElementById('report-date');
+    const date = d?.value || new Date().toISOString().slice(0, 10);
     const btn  = document.getElementById('btn-download-report');
-    if (btn) { btn.disabled = true; btn.textContent = '⏳ 產生中…'; }
+    if (btn) { btn.disabled = true; btn.innerHTML = '⏳ 產生中…'; }
     window.location.href = `/api/report/download?date=${date}`;
-    setTimeout(() => { if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-file-pdf"></i> 下載 PDF'; } }, 3500);
+    setTimeout(() => {
+        if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-file-pdf"></i> 下載 PDF'; }
+    }, 3500);
 }
 
 async function sendReport() {
     const d    = document.getElementById('report-date');
-    const date = d ? d.value : new Date().toISOString().slice(0,10);
-    const btn  = document.getElementById('btn-send-report');
-    if (btn) { btn.disabled = true; btn.textContent = '⏳ 發送中…'; }
+    const date = d?.value || new Date().toISOString().slice(0, 10);
+    const recipEl = document.getElementById('email-recipient');
+    const recip   = recipEl?.value.trim() || '';
+
+    // 驗證：必須填寫收件人
+    if (!recip || !recip.includes('@')) {
+        recipEl?.focus();
+        showToast('⚠️ 請填寫有效的收件人 Email', 'error');
+        return;
+    }
+
+    const btn = document.getElementById('btn-send-report');
+    if (btn) { btn.disabled = true; btn.innerHTML = '⏳ 發送中…'; }
+
     try {
+        // 先儲存收件人（保存最新 email），再發送
+        await fetch('/api/settings/email/save', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email_recipient: recip })
+        });
+
         const res    = await fetch(`/api/report/send?date=${date}`);
         const result = await res.json();
-        showToast(result.message || (result.success ? '✅ 發送成功' : '❌ 發送失敗'),
+        showToast(result.message || (result.success ? '✅ 報表已發送' : '❌ 發送失敗'),
                   result.success ? 'success' : 'error');
-    } catch { showToast('連線失敗', 'error'); }
-    finally { if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-envelope"></i> Email 發送'; } }
+    } catch { showToast('❌ 連線失敗', 'error'); }
+    finally {
+        if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> 立即發送'; }
+    }
 }
 
 function showToast(msg, type = 'success') {

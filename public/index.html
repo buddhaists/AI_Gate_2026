@@ -503,83 +503,169 @@
 
 
             <!-- Email 報表設定子頁 -->
-            <div id="settings-sub-email" class="settings-sub-section" style="display:none;max-width:700px;margin:0 auto;">
-                <!-- 報表下載卡 -->
-                <div class="glass-card watchlist-form-card" style="padding:24px;margin-bottom:20px;">
-                    <div class="card-header" style="margin-bottom:16px;">
-                        <h3><i class="fa-solid fa-file-pdf" style="color:var(--color-primary);margin-right:8px;"></i>每日統計報表下載</h3>
+            <div id="settings-sub-email" class="settings-sub-section" style="display:none;max-width:680px;margin:0 auto;">
+
+                <!-- ① 快速發送區：只需填寫收件人 -->
+                <div class="glass-card watchlist-form-card" style="padding:26px;margin-bottom:20px;">
+                    <div class="card-header" style="margin-bottom:18px;">
+                        <h3 style="display:flex;align-items:center;gap:8px;">
+                            <i class="fa-solid fa-file-pdf" style="color:var(--color-primary);"></i>
+                            每日統計報表
+                        </h3>
+                        <p style="font-size:12px;color:var(--text-secondary);margin-top:4px;">
+                            選擇日期後可下載 PDF，或輸入收件人 Email 直接發送。
+                        </p>
                     </div>
-                    <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
-                        <div style="display:flex;flex-direction:column;gap:6px;flex:1;min-width:160px;">
-                            <label for="report-date" style="font-weight:600;font-size:13px;color:var(--text-primary);">
-                                <i class="fa-solid fa-calendar" style="margin-right:4px;font-size:11px;"></i> 選擇日期
+
+                    <!-- 日期 + 按鈕列 -->
+                    <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:16px;">
+                        <div style="display:flex;flex-direction:column;gap:5px;flex:1;min-width:150px;">
+                            <label for="report-date" style="font-weight:600;font-size:12px;color:var(--text-primary);">
+                                <i class="fa-solid fa-calendar" style="margin-right:4px;"></i>報表日期
                             </label>
                             <input type="date" id="report-date"
-                                   style="padding:10px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:rgba(0,0,0,0.25);color:#fff;font-size:13px;">
+                                   style="padding:9px 12px;border-radius:7px;border:1px solid rgba(255,255,255,0.12);
+                                          background:rgba(0,0,0,0.25);color:#fff;font-size:13px;outline:none;">
                         </div>
-                        <button id="btn-download-report" onclick="downloadReport()" class="btn btn-primary" style="height:42px;">
+                        <button id="btn-download-report" onclick="downloadReport()" class="btn btn-primary"
+                                style="height:40px;padding:0 18px;white-space:nowrap;">
                             <i class="fa-solid fa-file-pdf"></i> 下載 PDF
                         </button>
-                        <button id="btn-send-report" onclick="sendReport()" class="btn btn-secondary" style="height:42px;">
-                            <i class="fa-solid fa-envelope"></i> Email 發送
+                    </div>
+
+                    <!-- 收件人 Email（唯一必填項）+ 發送按鈕 -->
+                    <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;">
+                        <div style="display:flex;flex-direction:column;gap:5px;flex:1;min-width:220px;">
+                            <label for="email-recipient" style="font-weight:600;font-size:12px;color:var(--text-primary);">
+                                <i class="fa-solid fa-envelope" style="margin-right:4px;"></i>收件人 Email
+                            </label>
+                            <input type="email" id="email-recipient" placeholder="填入收件人信箱即可發送"
+                                   style="padding:9px 12px;border-radius:7px;border:1px solid rgba(255,255,255,0.12);
+                                          background:rgba(0,0,0,0.25);color:#fff;font-size:13px;outline:none;">
+                        </div>
+                        <button id="btn-send-report" onclick="sendReport()" class="btn btn-secondary"
+                                style="height:40px;padding:0 18px;white-space:nowrap;
+                                       background:linear-gradient(135deg,#6366f1,#8b5cf6);
+                                       border:none;color:#fff;font-weight:600;border-radius:7px;cursor:pointer;">
+                            <i class="fa-solid fa-paper-plane"></i> 立即發送
                         </button>
                     </div>
-                    <p style="font-size:11px;color:var(--text-secondary);margin-top:10px;">
-                        <i class="fa-solid fa-circle-info" style="margin-right:4px;"></i>
-                        系統每日 00:05 自動產生前一日報表。啟用 Email 後自動發送至收件人。
-                    </p>
-                </div>
-                <!-- SMTP 設定卡 -->
-                <div class="glass-card watchlist-form-card" style="padding:24px;">
-                    <div class="card-header" style="margin-bottom:16px;">
-                        <h3><i class="fa-solid fa-envelope-open-text" style="color:var(--color-primary);margin-right:8px;"></i>Email SMTP 設定</h3>
+
+                    <!-- SMTP 狀態指示 -->
+                    <div id="smtp-status-bar" style="margin-top:14px;padding:10px 14px;border-radius:7px;
+                                                     background:rgba(99,102,241,0.08);border:1px solid rgba(99,102,241,0.2);
+                                                     font-size:12px;color:var(--text-secondary);display:flex;
+                                                     align-items:center;gap:8px;">
+                        <i class="fa-solid fa-circle-info" style="color:#6366f1;"></i>
+                        <span id="smtp-status-text">讀取寄件設定中…</span>
                     </div>
-                    <form id="email-settings-form" onsubmit="saveEmailSettings(event)" class="watchlist-form">
-                        <div style="display:flex;flex-direction:column;gap:14px;">
-                            <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-weight:600;font-size:13px;">
-                                <input type="checkbox" id="email-enabled" style="width:16px;height:16px;accent-color:var(--color-primary);">
-                                啟用每日自動 Email 報表（凌晨 00:05）
-                            </label>
-                            <div style="display:grid;grid-template-columns:1fr 110px;gap:12px;">
+                </div>
+
+                <!-- ② 進階 SMTP 設定（收合式） -->
+                <details style="margin-bottom:6px;">
+                    <summary style="cursor:pointer;padding:14px 20px;border-radius:10px;
+                                    background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);
+                                    font-weight:600;font-size:13px;color:var(--text-primary);
+                                    display:flex;align-items:center;gap:8px;list-style:none;user-select:none;">
+                        <i class="fa-solid fa-gear" style="color:var(--color-primary);"></i>
+                        進階 SMTP 寄件設定（Gmail / 企業信箱）
+                        <span style="margin-left:auto;font-size:11px;color:var(--text-secondary);">
+                            ▾ 展開
+                        </span>
+                    </summary>
+                    <div class="glass-card watchlist-form-card" style="padding:22px;margin-top:10px;border-radius:10px;">
+                        <form id="email-settings-form" onsubmit="saveEmailSettings(event)" class="watchlist-form">
+                            <div style="display:flex;flex-direction:column;gap:14px;">
+
+                                <!-- 啟用自動排程 -->
+                                <label style="display:flex;align-items:center;gap:10px;cursor:pointer;
+                                              padding:10px 14px;background:rgba(99,102,241,0.08);
+                                              border-radius:8px;border:1px solid rgba(99,102,241,0.15);">
+                                    <input type="checkbox" id="email-enabled"
+                                           style="width:16px;height:16px;accent-color:#6366f1;" onchange="saveEmailEnabled(this)">
+                                    <span>
+                                        <span style="font-weight:600;font-size:13px;">啟用每日自動發送（凌晨 00:05）</span><br>
+                                        <span style="font-size:11px;color:var(--text-secondary);">系統自動產生昨日報表，寄至上方填寫的收件人</span>
+                                    </span>
+                                </label>
+
+                                <!-- SMTP 主機 + Port -->
+                                <div style="display:grid;grid-template-columns:1fr 100px;gap:10px;">
+                                    <div style="display:flex;flex-direction:column;gap:5px;">
+                                        <label for="email-smtp-host" style="font-weight:600;font-size:12px;color:var(--text-primary);">SMTP 主機</label>
+                                        <input type="text" id="email-smtp-host" placeholder="smtp.gmail.com"
+                                               style="padding:9px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:rgba(0,0,0,0.2);color:#fff;font-size:13px;">
+                                    </div>
+                                    <div style="display:flex;flex-direction:column;gap:5px;">
+                                        <label for="email-smtp-port" style="font-weight:600;font-size:12px;color:var(--text-primary);">Port</label>
+                                        <input type="number" id="email-smtp-port" value="587" min="1" max="65535"
+                                               style="padding:9px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:rgba(0,0,0,0.2);color:#fff;font-size:13px;">
+                                    </div>
+                                </div>
+
+                                <!-- 寄件帳號 -->
                                 <div style="display:flex;flex-direction:column;gap:5px;">
-                                    <label for="email-smtp-host" style="font-weight:600;font-size:12px;color:var(--text-primary);">SMTP 主機</label>
-                                    <input type="text" id="email-smtp-host" placeholder="smtp.gmail.com"
+                                    <label for="email-smtp-user" style="font-weight:600;font-size:12px;color:var(--text-primary);">
+                                        寄件人帳號（Gmail 地址）
+                                    </label>
+                                    <input type="email" id="email-smtp-user" placeholder="your@gmail.com"
                                            style="padding:9px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:rgba(0,0,0,0.2);color:#fff;font-size:13px;">
                                 </div>
+
+                                <!-- 應用程式密碼 -->
                                 <div style="display:flex;flex-direction:column;gap:5px;">
-                                    <label for="email-smtp-port" style="font-weight:600;font-size:12px;color:var(--text-primary);">Port</label>
-                                    <input type="number" id="email-smtp-port" placeholder="587" min="1" max="65535"
-                                           style="padding:9px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:rgba(0,0,0,0.2);color:#fff;font-size:13px;">
+                                    <label for="email-smtp-pass" style="font-weight:600;font-size:12px;color:var(--text-primary);">
+                                        應用程式密碼
+                                        <a href="https://myaccount.google.com/apppasswords" target="_blank"
+                                           style="margin-left:8px;font-size:11px;color:#6366f1;text-decoration:none;">
+                                            <i class="fa-solid fa-arrow-up-right-from-square" style="font-size:9px;"></i>
+                                            如何取得？
+                                        </a>
+                                    </label>
+                                    <div style="position:relative;">
+                                        <input type="password" id="email-smtp-pass" placeholder="16 位元 App Password"
+                                               style="padding:9px 36px 9px 9px;border-radius:6px;width:100%;
+                                                      border:1px solid rgba(255,255,255,0.1);background:rgba(0,0,0,0.2);
+                                                      color:#fff;font-size:13px;box-sizing:border-box;">
+                                        <button type="button" onclick="togglePassVis()" title="顯示/隱藏"
+                                                style="position:absolute;right:8px;top:50%;transform:translateY(-50%);
+                                                       background:none;border:none;color:var(--text-secondary);cursor:pointer;font-size:14px;">
+                                            <i class="fa-solid fa-eye" id="pass-eye"></i>
+                                        </button>
+                                    </div>
+                                    <span style="font-size:11px;color:var(--text-secondary);">
+                                        <i class="fa-solid fa-circle-info" style="margin-right:3px;"></i>
+                                        需先在 Google 帳戶開啟兩步驟驗證，再至「應用程式密碼」頁面產生 16 碼密碼。
+                                    </span>
                                 </div>
+
+                                <button type="submit" class="btn btn-primary" style="height:42px;justify-content:center;
+                                        background:linear-gradient(135deg,#1e3a5f,#2d6a9f);">
+                                    <i class="fa-solid fa-floppy-disk"></i> 儲存 SMTP 設定
+                                </button>
                             </div>
-                            <div style="display:flex;flex-direction:column;gap:5px;">
-                                <label for="email-smtp-user" style="font-weight:600;font-size:12px;color:var(--text-primary);">寄件人帳號（SMTP user）</label>
-                                <input type="email" id="email-smtp-user" placeholder="your@gmail.com"
-                                       style="padding:9px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:rgba(0,0,0,0.2);color:#fff;font-size:13px;">
-                            </div>
-                            <div style="display:flex;flex-direction:column;gap:5px;">
-                                <label for="email-smtp-pass" style="font-weight:600;font-size:12px;color:var(--text-primary);">應用程式密碼（Gmail App Password）</label>
-                                <input type="password" id="email-smtp-pass" placeholder="16位元應用程式密碼"
-                                       style="padding:9px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:rgba(0,0,0,0.2);color:#fff;font-size:13px;">
-                            </div>
-                            <div style="display:flex;flex-direction:column;gap:5px;">
-                                <label for="email-recipient" style="font-weight:600;font-size:12px;color:var(--text-primary);">收件人 Email</label>
-                                <input type="email" id="email-recipient" placeholder="principal@school.edu.tw"
-                                       style="padding:9px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:rgba(0,0,0,0.2);color:#fff;font-size:13px;">
-                            </div>
-                            <p style="font-size:11px;color:var(--text-secondary);">
-                                <i class="fa-solid fa-circle-info" style="margin-right:4px;"></i>
-                                Gmail 需開啟兩步驟驗證後，至帳戶安全性→應用程式密碼產生 16 碼專用密碼。
-                            </p>
-                            <button type="submit" class="btn btn-primary" style="height:42px;justify-content:center;">
-                                <i class="fa-solid fa-floppy-disk"></i> 儲存 Email 設定
-                            </button>
-                        </div>
-                    </form>
+                        </form>
+                    </div>
+                </details>
+
+                <!-- 設定說明 -->
+                <div style="padding:14px 16px;background:rgba(255,255,255,0.03);border-radius:8px;
+                            border:1px solid rgba(255,255,255,0.06);font-size:12px;color:var(--text-secondary);
+                            margin-top:12px;line-height:1.8;">
+                    <p style="margin:0 0 6px;font-weight:600;color:var(--text-primary);">
+                        <i class="fa-solid fa-list-check" style="margin-right:6px;color:var(--color-primary);"></i>
+                        Gmail 一次性設定步驟
+                    </p>
+                    <ol style="margin:0;padding-left:20px;">
+                        <li>登入 Google 帳戶 → 安全性 → 開啟<strong>兩步驟驗證</strong></li>
+                        <li>至 <a href="https://myaccount.google.com/apppasswords" target="_blank" style="color:#6366f1;">應用程式密碼</a>，新增「郵件」裝置，取得 16 碼密碼</li>
+                        <li>在上方展開「進階 SMTP 設定」，填入 Gmail 帳號 + 應用程式密碼後儲存</li>
+                        <li>完成！日後只需填收件人信箱即可發送報表 ✅</li>
+                    </ol>
                 </div>
             </div>
 
-            <!-- tab-zones: Interactive Gate Zone Editor -->
+<!-- tab-zones: Interactive Gate Zone Editor -->
             <section id="tab-zones" class="tab-section">
                 <div class="section-header" style="margin-bottom:20px;">
                     <h3 class="section-title"><i class="fa-solid fa-draw-polygon"></i> 偵測區域設定</h3>
