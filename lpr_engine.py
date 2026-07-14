@@ -81,6 +81,7 @@ DEFAULT_ZONE_POLYGONS = {
 }
 GATE_ZONE_POLYGONS = {}   # int cam_id -> np.array polygon
 gate_zones = {}            # int cam_id -> sv.PolygonZone
+gate_zone_masks = {}       # int cam_id -> pre-built 320x180 uint8 motion mask (改進 1)
 zone_config_lock = threading.Lock()
 
 def load_zone_config():
@@ -102,16 +103,28 @@ def save_zone_config(zones_dict):
         print(f"[SYSTEM] zone_config.json save error: {e}")
 
 def rebuild_gate_zones():
-    """Rebuild sv.PolygonZone objects from the current GATE_ZONE_POLYGONS global."""
-    global gate_zones
+    """Rebuild sv.PolygonZone objects and pre-build motion detection masks
+    from the current GATE_ZONE_POLYGONS global.
+    Called at startup and on every POST /api/zones — NOT on every frame."""
+    global gate_zones, gate_zone_masks
     new_zones = {}
+    new_masks = {}
     for cam_id, poly in GATE_ZONE_POLYGONS.items():
         new_zones[cam_id] = sv.PolygonZone(
             polygon=poly,
             triggering_anchors=[sv.Position.CENTER]
         )
+        # 改進 1: Pre-build 320×180 motion mask once per zone change.
+        # Main loop uses gate_zone_masks[cam_id] directly — no per-frame
+        # np.zeros() allocation or fillPoly() call needed.
+        mask = np.zeros((180, 320), dtype=np.uint8)
+        poly_small = (poly / 6.0).astype(np.int32)
+        cv2.fillPoly(mask, [poly_small], 255)
+        new_masks[cam_id] = mask
     gate_zones = new_zones
+    gate_zone_masks = new_masks
     print(f"[SYSTEM] PolygonZone gate filters rebuilt for cameras: {list(gate_zones.keys())}")
+
 
 # Load Configuration from config.json
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
@@ -276,6 +289,18 @@ def init_db():
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('web_password', '3762828')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('retention_days', '30')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('offline_threshold_minutes', '5')")
+
+    # ── 改進 2: Performance-critical indices (none existed before) ─────────────
+    # Without these, every API query does a full O(n) table scan.
+    # With these, common queries become O(log n) — 10-50x faster at 10k+ rows.
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_det_timestamp  ON detections(timestamp DESC)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_det_plate       ON detections(plate_number)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_det_camera      ON detections(camera_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_alert_plate     ON alerts(plate_number)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_alert_timestamp ON alerts(timestamp DESC)")
+
+    conn.commit()
+    conn.close()
 
 # go2rtc global processes and cache
 go2rtc_process = None
@@ -2316,27 +2341,19 @@ def main():
                     # draw it on the mask, and bitwise-AND it with diff_thresh.
                     # This ensures motion is ONLY evaluated inside the custom polygon zone,
                     # completely ignoring background wind/leaves noise outside the zone.
+                    # 改進 1: Use pre-cached mask from gate_zone_masks (built once in
+                    # rebuild_gate_zones). No np.zeros() or fillPoly() per frame.
                     raw_motion_detected = False
-                    poly = GATE_ZONE_POLYGONS.get(cam_id)
-                    if poly is not None:
-                        # Create black mask
-                        mask = np.zeros((180, 320), dtype=np.uint8)
-                        # Scale down polygon (1920x1080 -> 320x180, scale factor = 6)
-                        poly_small = (poly / 6.0).astype(np.int32)
-                        cv2.fillPoly(mask, [poly_small], 255)
-                        
-                        # Apply mask
-                        driveway_diff = cv2.bitwise_and(diff_thresh, mask)
+                    cached_mask = gate_zone_masks.get(cam_id)
+                    if cached_mask is not None:
+                        # Apply pre-built mask directly
+                        driveway_diff = cv2.bitwise_and(diff_thresh, cached_mask)
                         changed_driveway_pixels = cv2.countNonZero(driveway_diff)
-                        
-                        # Set adaptive threshold based on camera profile
-                        # (Motorcycles typically change >100 pixels in the scaled mask)
-                        motion_threshold = 100
-                        if cam_name == "學校大門":
-                            motion_threshold = 120
-                        elif cam_name == "學校大門002":
-                            motion_threshold = 100
-                            
+
+                        # Motion threshold by cam_id (改進 9 from report: avoid cam_name string)
+                        _MOTION_THRESHOLDS = {1: 100, 3: 120, 6: 100}
+                        motion_threshold = _MOTION_THRESHOLDS.get(cam_id, 100)
+
                         if changed_driveway_pixels >= motion_threshold:
                             raw_motion_detected = True
                     else:
@@ -2344,7 +2361,7 @@ def main():
                         changed_pixels = cv2.countNonZero(diff_thresh)
                         if changed_pixels >= 80:
                             raw_motion_detected = True
-                    
+
                     if raw_motion_detected:
                         consecutive_motion_counts[cam_id] = consecutive_motion_counts.get(cam_id, 0) + 1
                         # Require 2 consecutive frames of motion to confirm actual vehicle pass
@@ -2353,6 +2370,7 @@ def main():
                             has_motion = True
                     else:
                         consecutive_motion_counts[cam_id] = 0
+
                 
                 prev_grays[cam_id] = gray_small
                 
@@ -2402,38 +2420,41 @@ def main():
                             else:
                                 system_enabled = False
 
-                # Throttle display updates to 10fps to prevent YOLO (200ms) from
-                # causing display gaps. Only create display frame if enough time has passed.
-                do_display_update = (time.time() - last_display_update.get(cam_id, 0)) >= DISPLAY_UPDATE_INTERVAL
-                display_h, display_w = 360, 640  # P7: reduced from 960x540 to cut imencode CPU ~60%
+                # 改進 4: Lazy display_frame creation — avoid unconditional 6MB frame.copy().
+                # For early-exit paths (paused / no-motion), only copy when do_display_update.
+                # For the YOLO path (has_motion + active), display_frame is always needed
+                # for bbox annotation, so it is created below after these checks.
+                display_h, display_w = 360, 640
 
-                # Create display frame and draw gate indicator (only for 學校大門)
-                display_frame = frame.copy()
-                if cam_name == "學校大門":
-                    left_color = (0, 0, 255) if last_left_gate_closed else (0, 255, 0)
-                    right_color = (0, 0, 255) if last_right_gate_closed else (0, 255, 0)
-                    
-                    # Left half box
-                    cv2.rectangle(display_frame, (600, 2), (925, 75), left_color, 2)
-                    # Right half box
-                    cv2.rectangle(display_frame, (925, 2), (1250, 75), right_color, 2)
-                    
-                    if last_gate_state == 'closed':
-                        cv2.putText(display_frame, "GATE CLOSED", (610, 30), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                    else:
-                        cv2.putText(display_frame, "GATE OPEN (>50%)", (610, 30), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                def _make_display_frame():
+                    """Create display_frame with gate indicator + zone polygon drawn."""
+                    df = frame.copy()
+                    if cam_name == "學校大門":
+                        left_color = (0, 0, 255) if last_left_gate_closed else (0, 255, 0)
+                        right_color = (0, 0, 255) if last_right_gate_closed else (0, 255, 0)
+                        cv2.rectangle(df, (600, 2), (925, 75), left_color, 2)
+                        cv2.rectangle(df, (925, 2), (1250, 75), right_color, 2)
+                        if last_gate_state == 'closed':
+                            cv2.putText(df, "GATE CLOSED", (610, 30),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                        else:
+                            cv2.putText(df, "GATE OPEN (>50%)", (610, 30),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    _zpoly = GATE_ZONE_POLYGONS.get(cam_id)
+                    if _zpoly is not None:
+                        cv2.polylines(df, [_zpoly], True, (0, 220, 255), 2)
+                        cv2.putText(df, "ZONE",
+                                    (int(_zpoly[0][0]) + 6, int(_zpoly[0][1]) + 26),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 220, 255), 2)
+                    return df
 
-                # ── Always draw gate zone polygon on every display frame ────────────
-                # Drawn here (before any 'continue') so it appears in ALL display
-                # states: idle, motion, LPR trigger, and paused.
-                zone_poly_draw = GATE_ZONE_POLYGONS.get(cam_id)
-                if zone_poly_draw is not None:
-                    cv2.polylines(display_frame, [zone_poly_draw], True, (0, 220, 255), 2)
-                    cv2.putText(display_frame, "ZONE",
-                                (int(zone_poly_draw[0][0]) + 6, int(zone_poly_draw[0][1]) + 26),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 220, 255), 2)
+                def _encode_and_push(df):
+                    """Resize + JPEG-encode df and push to MJPEG buffer."""
+                    ds = cv2.resize(df, (display_w, display_h))
+                    _, enc = cv2.imencode('.jpg', ds, [cv2.IMWRITE_JPEG_QUALITY, 65])
+                    with frame_lock:
+                        latest_display_frames[cam_id] = enc.tobytes()
+                    last_display_update[cam_id] = time.time()
 
                 # Check if LPR is paused for this specific camera
                 camera_lpr_active = True
@@ -2443,24 +2464,21 @@ def main():
                     camera_lpr_active = system_enabled
 
                 if not camera_lpr_active:
-                    cv2.putText(display_frame, "SYSTEM PAUSED (MONITORING INACTIVE)", (30, 45), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                     if do_display_update:
-                        display_small = cv2.resize(display_frame, (display_w, display_h))
-                        _, img_encoded = cv2.imencode('.jpg', display_small, [cv2.IMWRITE_JPEG_QUALITY, 65])
-                        with frame_lock:
-                            latest_display_frames[cam_id] = img_encoded.tobytes()
-                        last_display_update[cam_id] = time.time()
+                        display_frame = _make_display_frame()
+                        cv2.putText(display_frame, "SYSTEM PAUSED (MONITORING INACTIVE)", (30, 45),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                        _encode_and_push(display_frame)
                     continue
 
                 if not has_motion:
                     if do_display_update:
-                        display_small = cv2.resize(display_frame, (display_w, display_h))
-                        _, img_encoded = cv2.imencode('.jpg', display_small, [cv2.IMWRITE_JPEG_QUALITY, 65])
-                        with frame_lock:
-                            latest_display_frames[cam_id] = img_encoded.tobytes()
-                        last_display_update[cam_id] = time.time()
+                        _encode_and_push(_make_display_frame())
                     continue
+
+                # Has motion + camera active: always need display_frame for YOLO bbox annotation.
+                display_frame = _make_display_frame()
+
                 
                 # Run YOLO every 3 frames during trigger window.
                 # 30-frame window ÷ 3 = 10 YOLO runs per trigger at ~6fps = covers 5 seconds.
@@ -2514,7 +2532,10 @@ def main():
                         crop_y2 = min(h, int(_y_max * (1 + _margin)))
 
                     yolo_input = detection_frame[crop_y1:crop_y2, crop_x1:crop_x2]
-                    results = model(yolo_input, conf=0.15, imgsz=640, verbose=False)
+                    # 改進 3: conf=0.25 (was 0.15) filters low-quality detections before OCR.
+                    # iou=0.45 (was default 0.7) more aggressively suppresses overlapping
+                    # boxes — license plates are compact, duplicate boxes are noise.
+                    results = model(yolo_input, conf=0.25, iou=0.45, imgsz=640, verbose=False)
                     current_time = time.time()
                     
                     # Check if any plates were found (result boxes are relative to cropped image)
