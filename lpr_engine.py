@@ -120,6 +120,41 @@ def _encode_and_push(df, cam_id, last_display_update):
         latest_display_frames[cam_id] = enc.tobytes()
     last_display_update[cam_id] = time.time()
 
+# ── 光照自適應 YOLO 信心度 ────────────────────────────────────────────────────
+# 每支攝影機獨立追蹤 Zone 區域內的亮度，並依此動態調整 YOLO conf 閾值。
+# 解決問題：下午強光/逆光/陰天/夜間等不同光照條件下，固定 conf 值會造成
+#   - conf 過高 → 漏報（下午逆光時車牌信心度降至 0.15-0.24，被過濾）
+#   - conf 過低 → 誤報（良好光照下低信心雜訊框也會進入 OCR）
+# 量測成本極低：每幀只對 320×180 縮小圖的 Zone mask 像素做 mean/std。
+_cam_brightness_history: dict = {}   # cam_id -> deque(maxlen=60)  ~10s @ 6fps
+_cam_yolo_conf: dict = {}            # cam_id -> 當前 adaptive conf 值
+_cam_lighting_condition: dict = {}   # cam_id -> 當前光照狀態標籤 (str)
+_cam_last_lighting_log: dict = {}    # cam_id -> 上次寫入 log 的 timestamp
+
+def _compute_yolo_conf(mean_b: float, std_b: float):
+    """依 Zone 區域平均亮度與標準差，計算適合的 YOLO conf 與狀態標籤。
+
+    光照狀態對照表：
+      overexposed : mean > 190 且 std < 38  → 強光/逆光/反射炫光，車牌曝白
+      bright      : mean > 160              → 晴天良好光照
+      normal      : mean > 95               → 一般日光
+      dim         : mean > 45               → 黃昏/陰天/多雲
+      dark        : mean ≤ 45               → 夜間/極暗
+
+    Returns:
+        (conf: float, condition: str)
+    """
+    if mean_b > 190 and std_b < 38:
+        return 0.12, "overexposed"   # 炫光/曝白 → 降低閾值增加偵測率
+    elif mean_b > 160:
+        return 0.20, "bright"        # 晴天 → 提高閾值減少雜訊框
+    elif mean_b > 95:
+        return 0.15, "normal"        # 一般日光 → 標準閾值
+    elif mean_b > 45:
+        return 0.12, "dim"           # 黃昏/陰天 → 降低閾值
+    else:
+        return 0.10, "dark"          # 夜間 → 最低閾值
+
 # Background image save queue — offloads cv2.imwrite from the main detection loop
 _image_save_queue = queue.Queue(maxsize=64)
 def _image_saver_worker():
@@ -2490,7 +2525,38 @@ def main():
 
                 
                 prev_grays[cam_id] = gray_small
-                
+
+                # ── 光照量測：每幀更新，Zone 區域 mean/std ────────────────────
+                # 使用已計算的 gray_small (320×180) 與 cached_mask，幾乎零額外成本。
+                _bright_src = gray_small
+                _bright_mask = gate_zone_masks.get(cam_id)
+                if _bright_mask is not None:
+                    _zone_px = _bright_src[_bright_mask > 0]
+                else:
+                    _zone_px = _bright_src.flatten()
+                if len(_zone_px) > 50:
+                    _bm = float(np.mean(_zone_px))
+                    _bs = float(np.std(_zone_px))
+                    if cam_id not in _cam_brightness_history:
+                        _cam_brightness_history[cam_id] = deque(maxlen=60)
+                    _cam_brightness_history[cam_id].append((_bm, _bs))
+                    _hist = _cam_brightness_history[cam_id]
+                    if len(_hist) >= 10:  # 需至少 10 個樣本才開始調整
+                        _avg_m = sum(x[0] for x in _hist) / len(_hist)
+                        _avg_s = sum(x[1] for x in _hist) / len(_hist)
+                        _new_conf, _cond = _compute_yolo_conf(_avg_m, _avg_s)
+                        _old_conf = _cam_yolo_conf.get(cam_id, 0.15)
+                        _cam_yolo_conf[cam_id] = _new_conf
+                        _cam_lighting_condition[cam_id] = _cond
+                        # 每 60 秒記錄一次，或光照狀態改變時立即記錄
+                        _now_l = time.time()
+                        _cond_changed = abs(_new_conf - _old_conf) > 0.019
+                        if _cond_changed or (_now_l - _cam_last_lighting_log.get(cam_id, 0)) > 60:
+                            print(f"[LIGHTING] {active_camera_names.get(cam_id, cam_id)} "
+                                  f"mean={_avg_m:.0f} std={_avg_s:.0f} "
+                                  f"conf={_new_conf:.2f} [{_cond}]")
+                            _cam_last_lighting_log[cam_id] = _now_l
+
                 if driveway_motion:
                     last_motion_times[cam_id] = time.time()
                     # Minimum 8 seconds between trigger resets.
@@ -2622,14 +2688,16 @@ def main():
                         crop_y2 = min(h, int(_y_max * (1 + _margin)))
 
                     yolo_input = detection_frame[crop_y1:crop_y2, crop_x1:crop_x2]
-                    # conf=0.15: 改回原始值（0.25 在下午強光/逆光條件下會漏掉真實車牌）。
-                    # OCR 信心度閾值 (0.40/0.50/0.65) 仍負責過濾低品質讀取，
-                    # 所以降低 YOLO conf 不會增加誤報，只會恢復漏報的偵測。
-                    # iou=0.45: 積極抑制重複框（車牌框緊湊，重複框是雜訊）。
-                    # 改進 5: Dynamic imgsz from crop dimensions.
+                    # 光照自適應 conf：由 _cam_yolo_conf 動態提供（預設 0.15）。
+                    # 每幀在 Zone 區域量測亮度並滾動平均後計算：
+                    #   overexposed(炫光) → 0.12, bright(晴天) → 0.20,
+                    #   normal(一般) → 0.15, dim(黃昏) → 0.12, dark(夜間) → 0.10
+                    # OCR 信心度閾值 (0.40/0.50/0.65) 仍負責最終品質過濾。
+                    # iou=0.45: 積極抑制重複框。改進 5: Dynamic imgsz.
                     _crop_long = max(crop_x2 - crop_x1, crop_y2 - crop_y1)
                     _imgsz = max(320, min(640, (_crop_long // 32) * 32))
-                    results = model(yolo_input, conf=0.15, iou=0.45, imgsz=_imgsz, verbose=False)
+                    _yolo_conf = _cam_yolo_conf.get(cam_id, 0.15)
+                    results = model(yolo_input, conf=_yolo_conf, iou=0.45, imgsz=_imgsz, verbose=False)
                     current_time = time.time()
                     
                     # Check if any plates were found (result boxes are relative to cropped image)
