@@ -129,7 +129,39 @@ def _image_saver_worker():
             break
         path, img = item
         try:
-            cv2.imwrite(path, img)
+            # ── 截圖品質提升 ───────────────────────────────────────────────────
+            # crop_ 檔案：原始裁切圖通常只有 ~80×30px。
+            # 直接存 JPEG 放大後非常模糊。
+            # 改進：放大到至少 300px 寬（最多 3×），然後 CLAHE + 銳化，
+            # 再以 quality=90 存 JPEG，讓人工審查截圖清晰可辨識。
+            # full_ 檔案：整張 1080p 幀，原始存即可。
+            if os.path.basename(path).startswith("crop_"):
+                h, w = img.shape[:2]
+                if w > 0 and h > 0:
+                    # 放大倍率：目標 300px 寬，上限 3×（避免過度放大失真）
+                    scale = min(3.0, max(1.0, 300.0 / w))
+                    if scale > 1.0:
+                        new_w = int(w * scale)
+                        new_h = int(h * scale)
+                        img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
+                    # CLAHE on luminance channel
+                    try:
+                        ycrcb = cv2.cvtColor(img, cv2.COLOR_BGR2YCrCb)
+                        y_ch, cr, cb = cv2.split(ycrcb)
+                        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(4, 4))
+                        y_ch = clahe.apply(y_ch)
+                        img = cv2.cvtColor(cv2.merge([y_ch, cr, cb]), cv2.COLOR_YCrCb2BGR)
+                    except Exception:
+                        pass
+                    # Unsharp mask
+                    try:
+                        blurred = cv2.GaussianBlur(img, (3, 3), 0)
+                        img = cv2.addWeighted(img, 1.6, blurred, -0.6, 0)
+                    except Exception:
+                        pass
+                cv2.imwrite(path, img, [cv2.IMWRITE_JPEG_QUALITY, 90])
+            else:
+                cv2.imwrite(path, img, [cv2.IMWRITE_JPEG_QUALITY, 92])
         except Exception as e:
             print(f"[SYSTEM] Image save error for {path}: {e}")
         finally:
