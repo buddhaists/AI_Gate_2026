@@ -2465,7 +2465,10 @@ def main():
                         changed_driveway_pixels = cv2.countNonZero(driveway_diff)
 
                         # Motion threshold by cam_id (改進 9 from report: avoid cam_name string)
-                        _MOTION_THRESHOLDS = {1: 100, 3: 120, 6: 100}
+                        # Camera 002 (cam_id=1) threshold raised 100→200: Camera 002 was triggering
+                        # every ~8s from wind/shadow environmental noise within the zone polygon.
+                        # Vehicles produce 300-800+ changed pixels; leaf/shadow noise is 80-150px.
+                        _MOTION_THRESHOLDS = {1: 200, 3: 120, 6: 100}
                         motion_threshold = _MOTION_THRESHOLDS.get(cam_id, 100)
 
                         if changed_driveway_pixels >= motion_threshold:
