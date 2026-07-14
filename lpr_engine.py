@@ -427,8 +427,17 @@ def generate_daily_report_pdf(date_str: str) -> str:
 
 
 def _smtp_connect(smtp_host, smtp_port, smtp_user, smtp_pass):
-    """建立 SMTP 連線並登入，自動選擇 SSL(465) 或 STARTTLS(587/25)。"""
+    """建立 SMTP 連線並登入，自動選擇 SSL(465) 或 STARTTLS(587/25)。
+    
+    Note: Google App Password 的空格會自動移除（使用者常帶空格貼入）。
+    """
     import smtplib
+    # 移除 App Password 中的空格（Google 顯示格式為 xxxx xxxx xxxx xxxx）
+    clean_pass = smtp_pass.replace(' ', '').replace('\t', '')
+    # 長度提示（不中斷，但記錄警告）
+    if clean_pass and len(clean_pass) != 16:
+        print(f"[REPORT] WARNING: App Password length is {len(clean_pass)} (expected 16). "
+              f"Please verify the password is complete.")
     if smtp_port == 465:
         # SSL 直接連線
         server = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=15)
@@ -439,7 +448,7 @@ def _smtp_connect(smtp_host, smtp_port, smtp_user, smtp_pass):
         server.ehlo()
         server.starttls()
         server.ehlo()
-    server.login(smtp_user, smtp_pass)
+    server.login(smtp_user, clean_pass)
     return server
 
 
@@ -451,7 +460,13 @@ def _translate_smtp_error(e: Exception) -> str:
                 '→ 請至 myaccount.google.com/apppasswords 產生 16 碼應用程式密碼，'
                 '不可使用一般 Gmail 登入密碼。')
     if '535' in msg or '5.7.8' in msg:
-        return '帳號或密碼錯誤（535）。請確認寄件帳號與應用程式密碼是否正確。'
+        return ('密碼驗證失敗（535）\n'
+                '→ 常見原因：\n'
+                '  1. 應用程式密碼不完整（必須是 16 碼，格式如 xxxx xxxx xxxx xxxx）\n'
+                '  2. 使用了 Gmail 一般登入密碼（需改用應用程式密碼）\n'
+                '  3. 應用程式密碼已被撤銷（請至 myaccount.google.com/apppasswords 重新產生）\n'
+                '  4. 寄件帳號輸入錯誤（請確認 @fsps.ptc.edu.tw 完整地址）\n'
+                '→ 系統已自動去除密碼中的空格，無需手動移除。')
     if '534' in msg and 'less secure' in msg:
         return '請至 Google 帳戶開啟「低安全性應用程式存取」或改用應用程式密碼。'
     if 'getaddrinfo' in msg or 'nodename' in msg.lower():

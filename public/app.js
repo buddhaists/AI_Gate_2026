@@ -2000,6 +2000,32 @@ function togglePassVis() {
     }
 }
 
+// App Password 字元計數器（即時顯示，不含空格）
+function updatePassCounter() {
+    const inp     = document.getElementById('email-smtp-pass');
+    const counter = document.getElementById('pass-char-count');
+    if (!inp || !counter) return;
+    const len = inp.value.replace(/\s/g, '').length;  // 去除空格後的長度
+    counter.textContent = `${len}/16`;
+    if (len === 0) {
+        counter.style.color = 'var(--text-secondary)';
+    } else if (len === 16) {
+        counter.style.color = '#22c55e';   // 綠色：正確長度
+        counter.textContent = `${len}/16 ✓`;
+    } else if (len < 16) {
+        counter.style.color = '#f97316';   // 橘色：長度不足
+    } else {
+        counter.style.color = '#ef4444';   // 紅色：過長
+    }
+}
+
+// 在 DOMContentLoaded 時綁定計數器
+document.addEventListener('DOMContentLoaded', () => {
+    // 綁定 App Password input 計數器
+    const passInp = document.getElementById('email-smtp-pass');
+    if (passInp) passInp.addEventListener('input', updatePassCounter);
+});
+
 async function downloadReport() {
     const d    = document.getElementById('report-date');
     const date = d?.value || new Date().toISOString().slice(0, 10);
