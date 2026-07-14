@@ -1396,6 +1396,8 @@ async function loadSystemSettings() {
     loadAuthSettings();
     // Load System Maintenance settings
     loadMaintenanceSettings();
+    // Load Email Report settings
+    loadEmailSettings();
 }
 
 // Load and populate header select menu and settings list
@@ -1840,6 +1842,81 @@ async function saveMaintenanceSettings(event) {
         alert("儲存連線失敗，請檢查網路。");
         console.error("Save Maintenance settings error:", err);
     }
+}
+
+// ── Email 報表設定 ────────────────────────────────────────────────────────────
+async function loadEmailSettings() {
+    try {
+        const res  = await fetch('/api/settings/email');
+        if (!res.ok) return;
+        const data = await res.json();
+        document.getElementById('email-enabled').checked = data.email_enabled === '1';
+        document.getElementById('email-smtp-host').value = data.email_smtp_host || '';
+        document.getElementById('email-smtp-port').value = data.email_smtp_port || '587';
+        document.getElementById('email-smtp-user').value = data.email_smtp_user || '';
+        document.getElementById('email-smtp-pass').value = data.email_smtp_pass || '';
+        document.getElementById('email-recipient').value = data.email_recipient  || '';
+    } catch (err) { console.error('Load email settings error:', err); }
+}
+
+async function saveEmailSettings(event) {
+    event.preventDefault();
+    const payload = {
+        email_enabled:   document.getElementById('email-enabled').checked ? '1' : '0',
+        email_smtp_host: document.getElementById('email-smtp-host').value.trim(),
+        email_smtp_port: document.getElementById('email-smtp-port').value.trim(),
+        email_smtp_user: document.getElementById('email-smtp-user').value.trim(),
+        email_smtp_pass: document.getElementById('email-smtp-pass').value.trim(),
+        email_recipient: document.getElementById('email-recipient').value.trim(),
+    };
+    try {
+        const res    = await fetch('/api/settings/email/save', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const result = await res.json();
+        showToast(result.success ? 'Email 報表設定已儲存！' : '儲存失敗：' + result.error,
+                  result.success ? 'success' : 'error');
+    } catch { showToast('連線失敗', 'error'); }
+}
+
+async function downloadReport() {
+    const d   = document.getElementById('report-date');
+    const date = d ? d.value : new Date().toISOString().slice(0,10);
+    const btn  = document.getElementById('btn-download-report');
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ 產生中…'; }
+    window.location.href = `/api/report/download?date=${date}`;
+    setTimeout(() => { if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-file-pdf"></i> 下載 PDF'; } }, 3500);
+}
+
+async function sendReport() {
+    const d    = document.getElementById('report-date');
+    const date = d ? d.value : new Date().toISOString().slice(0,10);
+    const btn  = document.getElementById('btn-send-report');
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ 發送中…'; }
+    try {
+        const res    = await fetch(`/api/report/send?date=${date}`);
+        const result = await res.json();
+        showToast(result.message || (result.success ? '✅ 發送成功' : '❌ 發送失敗'),
+                  result.success ? 'success' : 'error');
+    } catch { showToast('連線失敗', 'error'); }
+    finally { if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-envelope"></i> Email 發送'; } }
+}
+
+function showToast(msg, type = 'success') {
+    let t = document.getElementById('lpr-toast');
+    if (!t) {
+        t = document.createElement('div'); t.id = 'lpr-toast';
+        t.style.cssText = `position:fixed;bottom:28px;right:28px;z-index:9999;padding:12px 22px;
+            border-radius:10px;font-size:14px;font-weight:600;color:#fff;pointer-events:none;
+            box-shadow:0 4px 20px rgba(0,0,0,0.35);transition:opacity 0.5s;opacity:0;`;
+        document.body.appendChild(t);
+    }
+    t.textContent = msg;
+    t.style.background = type === 'success' ? '#22c55e' : '#ef4444';
+    t.style.opacity = '1';
+    clearTimeout(t._tid);
+    t._tid = setTimeout(() => { t.style.opacity = '0'; }, 3500);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

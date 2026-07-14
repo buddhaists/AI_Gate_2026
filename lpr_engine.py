@@ -41,14 +41,16 @@ import supervision as sv  # Roboflow Supervision: PolygonZone gate filtering
 PUBLIC_DIR = r"D:\AntiGravity\ai camera-gate\public"
 DATA_DIR = r"D:\AntiGravity\lpr_data"
 DB_PATH = os.path.join(DATA_DIR, "lpr.db")
-CROPS_DIR = os.path.join(DATA_DIR, "crops")
-FULLS_DIR = os.path.join(DATA_DIR, "fulls")
+CROPS_DIR   = os.path.join(DATA_DIR, "crops")
+FULLS_DIR   = os.path.join(DATA_DIR, "fulls")
+REPORTS_DIR = os.path.join(DATA_DIR, "reports")
 ZONE_CONFIG_PATH = os.path.join(DATA_DIR, "zone_config.json")
 
 # Ensure directories exist
-os.makedirs(CROPS_DIR, exist_ok=True)
-os.makedirs(FULLS_DIR, exist_ok=True)
-os.makedirs(PUBLIC_DIR, exist_ok=True)
+os.makedirs(CROPS_DIR,   exist_ok=True)
+os.makedirs(FULLS_DIR,   exist_ok=True)
+os.makedirs(REPORTS_DIR, exist_ok=True)
+os.makedirs(PUBLIC_DIR,  exist_ok=True)
 
 # Global variables for sharing frames between threads
 latest_display_frames = {} # Key: camera_id (int), Value: JPEG bytes (compressed frame)
@@ -229,6 +231,282 @@ def compute_direction(y_history: list) -> str:
     elif dy < -8:  # 向上移動（Y 減少）→ 離場
         return 'EXIT'
     return 'UNKNOWN'
+
+# ── 每日統計報表系統 ───────────────────────────────────────────────────────────
+
+def _register_cjk_font():
+    """嘗試在 reportlab 中登錄繁體中文字型，回傳可用字型名稱。"""
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    candidates = [
+        r"C:\Windows\Fonts\msjh.ttc",    # Microsoft JhengHei（微軟正黑）
+        r"C:\Windows\Fonts\kaiu.ttf",     # 標楷體
+        r"C:\Windows\Fonts\mingliu.ttc",  # 細明體
+        r"C:\Windows\Fonts\meiryo.ttc",   # 日文（備用）
+    ]
+    for fp in candidates:
+        if os.path.exists(fp):
+            try:
+                pdfmetrics.registerFont(TTFont('CJK', fp))
+                return 'CJK'
+            except Exception:
+                pass
+    return 'Helvetica'  # fallback：英文 only
+
+def generate_daily_report_pdf(date_str: str) -> str:
+    """生成指定日期的每日統計報表 PDF，儲存至 REPORTS_DIR。
+
+    Args:
+        date_str: 'YYYY-MM-DD' 格式
+
+    Returns:
+        生成的 PDF 絕對路徑
+    """
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors
+    from reportlab.lib.units import cm
+    from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle,
+                                    Paragraph, Spacer, HRFlowable)
+    from reportlab.lib.styles import ParagraphStyle
+    import datetime as _dt
+
+    cn_font = _register_cjk_font()
+
+    # ── 查詢資料庫 ────────────────────────────────────────────────────────────
+    conn   = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT COUNT(*),
+               SUM(CASE WHEN direction='ENTER'      THEN 1 ELSE 0 END),
+               SUM(CASE WHEN direction='EXIT'       THEN 1 ELSE 0 END),
+               SUM(CASE WHEN vehicle_type='MOTORCYCLE' THEN 1 ELSE 0 END),
+               SUM(CASE WHEN vehicle_type='CAR'    THEN 1 ELSE 0 END)
+        FROM detections WHERE date(timestamp,'localtime') = ?
+    """, (date_str,))
+    r       = cursor.fetchone()
+    total   = r[0] or 0; enters = r[1] or 0; exits = r[2] or 0
+    motos   = r[3] or 0; cars   = r[4] or 0
+
+    cursor.execute("""
+        SELECT COUNT(*) FROM alerts a
+        JOIN detections d ON a.detection_id = d.id
+        WHERE date(d.timestamp,'localtime') = ?
+    """, (date_str,))
+    alerts_cnt = cursor.fetchone()[0] or 0
+
+    cursor.execute("""
+        SELECT c.name, COUNT(*),
+               SUM(CASE WHEN d.direction='ENTER' THEN 1 ELSE 0 END),
+               SUM(CASE WHEN d.direction='EXIT'  THEN 1 ELSE 0 END)
+        FROM detections d
+        LEFT JOIN cameras c ON d.camera_id = c.id
+        WHERE date(d.timestamp,'localtime') = ?
+        GROUP BY d.camera_id, c.name ORDER BY COUNT(*) DESC
+    """, (date_str,))
+    cam_rows = cursor.fetchall()
+
+    cursor.execute("""
+        SELECT strftime('%H', timestamp,'localtime') hr, COUNT(*)
+        FROM detections WHERE date(timestamp,'localtime') = ?
+        GROUP BY hr ORDER BY hr
+    """, (date_str,))
+    hourly = {row[0]: row[1] for row in cursor.fetchall()}
+
+    cursor.execute("""
+        SELECT plate_number, COUNT(*) cnt,
+               MAX(confidence),
+               MAX(CASE WHEN direction='ENTER' THEN 1 ELSE 0 END),
+               MAX(CASE WHEN direction='EXIT'  THEN 1 ELSE 0 END)
+        FROM detections WHERE date(timestamp,'localtime') = ?
+        GROUP BY plate_number ORDER BY cnt DESC LIMIT 15
+    """, (date_str,))
+    top_plates = cursor.fetchall()
+    conn.close()
+
+    # ── 建立 PDF ─────────────────────────────────────────────────────────────
+    pdf_path = os.path.join(REPORTS_DIR, f"daily_report_{date_str}.pdf")
+    doc = SimpleDocTemplate(pdf_path, pagesize=A4,
+                            rightMargin=2*cm, leftMargin=2*cm,
+                            topMargin=2*cm,  bottomMargin=2*cm)
+
+    def _sty(name, **kw):
+        return ParagraphStyle(name, fontName=cn_font, **kw)
+
+    title_sty    = _sty('T', fontSize=18, alignment=1, spaceAfter=4,
+                         textColor=colors.HexColor('#1e3a5f'))
+    subtitle_sty = _sty('S', fontSize=11, alignment=1, spaceAfter=10,
+                         textColor=colors.HexColor('#555555'))
+    head_sty     = _sty('H', fontSize=13, spaceBefore=12, spaceAfter=6,
+                         textColor=colors.HexColor('#1e3a5f'))
+    norm_sty     = _sty('N', fontSize=9,  spaceAfter=3,
+                         textColor=colors.HexColor('#333333'))
+    foot_sty     = _sty('F', fontSize=8,  alignment=1,
+                         textColor=colors.grey)
+
+    def _tbl(data, cols, hdr_color):
+        tbl = Table(data, colWidths=cols)
+        tbl.setStyle(TableStyle([
+            ('FONTNAME',      (0,0), (-1,-1), cn_font),
+            ('FONTSIZE',      (0,0), (-1,-1), 10),
+            ('BACKGROUND',    (0,0), (-1, 0), colors.HexColor(hdr_color)),
+            ('TEXTCOLOR',     (0,0), (-1, 0), colors.white),
+            ('ALIGN',         (1,0), (-1,-1), 'CENTER'),
+            ('ROWBACKGROUNDS',(0,1), (-1,-1),
+             [colors.HexColor('#f4f6f9'), colors.white]),
+            ('GRID',          (0,0), (-1,-1), 0.5, colors.HexColor('#cccccc')),
+            ('TOPPADDING',    (0,0), (-1,-1), 6),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+        ]))
+        return tbl
+
+    story = []
+    now_str = _dt.datetime.now().strftime('%Y-%m-%d %H:%M')
+
+    story.append(Paragraph('學校大門 AI 車輛管制系統', title_sty))
+    story.append(Paragraph(f'每日統計報表 — {date_str}', subtitle_sty))
+    story.append(Paragraph(f'產生時間：{now_str}', norm_sty))
+    story.append(HRFlowable(width='100%', thickness=2,
+                             color=colors.HexColor('#1e3a5f'), spaceAfter=10))
+
+    # 摘要
+    story.append(Paragraph('■ 當日摘要', head_sty))
+    story.append(_tbl([
+        ['項目', '數值'],
+        ['偵測總次數', str(total)],
+        ['進場 (ENTER)', str(enters)],
+        ['離場 (EXIT)', str(exits)],
+        ['機車', str(motos)],
+        ['汽車', str(cars)],
+        ['追蹤名單命中', str(alerts_cnt)],
+    ], [10*cm, 6*cm], '#1e3a5f'))
+    story.append(Spacer(1, 0.4*cm))
+
+    # 各攝影機
+    if cam_rows:
+        story.append(Paragraph('■ 各攝影機統計', head_sty))
+        story.append(_tbl(
+            [['攝影機', '偵測次數', '進場', '離場']] +
+            [[r[0] or '未知', str(r[1] or 0), str(r[2] or 0), str(r[3] or 0)]
+             for r in cam_rows],
+            [8*cm, 4*cm, 3*cm, 3*cm], '#2d6a9f'))
+        story.append(Spacer(1, 0.4*cm))
+
+    # 各時段分佈
+    story.append(Paragraph('■ 各時段偵測分佈（每3小時）', head_sty))
+    hr_data = [['時段', '次數', '時段', '次數', '時段', '次數']]
+    for i in range(0, 24, 3):
+        row = []
+        for j in range(3):
+            h = f"{i+j:02d}" if i+j < 24 else ''
+            row += [f"{h}:00" if h else '', str(hourly.get(h, 0)) if h else '']
+        hr_data.append(row)
+    story.append(_tbl(hr_data, [3*cm, 2*cm]*3, '#3d8b6b'))
+    story.append(Spacer(1, 0.4*cm))
+
+    # 前15名車牌
+    if top_plates:
+        story.append(Paragraph('■ 當日最常出現車牌（前15名）', head_sty))
+        rows = [['車牌號碼', '次數', '最高信心', '方向']]
+        for p in top_plates:
+            dirs = (['進場'] if p[3] else []) + (['離場'] if p[4] else [])
+            rows.append([p[0], str(p[1]), f"{p[2]*100:.0f}%",
+                         '/'.join(dirs) if dirs else '—'])
+        story.append(_tbl(rows, [5*cm, 3*cm, 3*cm, 4*cm], '#5b4f9e'))
+
+    story.append(Spacer(1, 0.8*cm))
+    story.append(HRFlowable(width='100%', thickness=1,
+                             color=colors.HexColor('#cccccc')))
+    story.append(Paragraph(
+        f'AI Camera Gate Monitor — 自動生成於 {now_str}', foot_sty))
+
+    doc.build(story)
+    size_kb = os.path.getsize(pdf_path) // 1024
+    print(f"[REPORT] PDF generated: {pdf_path} ({size_kb} KB)")
+    return pdf_path
+
+
+def send_report_email(pdf_path: str, date_str: str) -> tuple:
+    """以 SMTP 發送每日報表 PDF 至設定的收件人。
+
+    Returns:
+        (success: bool, message: str)
+    """
+    import smtplib
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.base      import MIMEBase
+    from email.mime.text      import MIMEText
+    from email                import encoders
+
+    conn   = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT key, value FROM settings WHERE key LIKE 'email_%'")
+    cfg = {r[0]: r[1] for r in cursor.fetchall()}
+    conn.close()
+
+    smtp_host = cfg.get('email_smtp_host', '')
+    smtp_port = int(cfg.get('email_smtp_port', '587') or '587')
+    smtp_user = cfg.get('email_smtp_user', '')
+    smtp_pass = cfg.get('email_smtp_pass', '')
+    recipient = cfg.get('email_recipient', '')
+
+    if not all([smtp_host, smtp_user, smtp_pass, recipient]):
+        return False, 'Email 設定不完整，請至「設定」頁面填寫 SMTP 資訊'
+
+    msg              = MIMEMultipart()
+    msg['From']      = smtp_user
+    msg['To']        = recipient
+    msg['Subject']   = f'[AI車輛管制] 每日報表 {date_str}'
+    msg.attach(MIMEText(
+        f"您好，\n\n附件為 {date_str} 的車輛管制系統每日統計報表。\n\n此為系統自動發送，請勿回覆。\nAI Camera Gate Monitor",
+        'plain', 'utf-8'))
+
+    if os.path.exists(pdf_path):
+        with open(pdf_path, 'rb') as f:
+            part = MIMEBase('application', 'octet-stream')
+            part.set_payload(f.read())
+        encoders.encode_base64(part)
+        part.add_header('Content-Disposition',
+                        f'attachment; filename="report_{date_str}.pdf"')
+        msg.attach(part)
+
+    try:
+        server = smtplib.SMTP(smtp_host, smtp_port, timeout=15)
+        server.ehlo()
+        server.starttls()
+        server.login(smtp_user, smtp_pass)
+        server.sendmail(smtp_user, [recipient], msg.as_string())
+        server.quit()
+        print(f"[REPORT] Email sent to {recipient} for {date_str}")
+        return True, f'報表已成功發送至 {recipient}'
+    except Exception as e:
+        print(f"[REPORT] Email error: {e}")
+        return False, f'發送失敗：{e}'
+
+
+def start_daily_report_scheduler():
+    """啟動每日凌晨 00:05 自動產生報表並（若啟用）發送 Email 的背景執行緒。"""
+    def _loop():
+        import datetime as _dt
+        while True:
+            now    = _dt.datetime.now()
+            target = now.replace(hour=0, minute=5, second=0, microsecond=0)
+            if now >= target:
+                target += _dt.timedelta(days=1)
+            time.sleep((target - now).total_seconds())
+            yesterday = (_dt.datetime.now() - _dt.timedelta(days=1)).strftime('%Y-%m-%d')
+            try:
+                pdf_path = generate_daily_report_pdf(yesterday)
+                conn   = sqlite3.connect(DB_PATH)
+                cursor = conn.cursor()
+                cursor.execute("SELECT value FROM settings WHERE key='email_enabled'")
+                res = cursor.fetchone(); conn.close()
+                if res and res[0] == '1':
+                    send_report_email(pdf_path, yesterday)
+            except Exception as e:
+                print(f"[REPORT] Daily scheduler error: {e}")
+    threading.Thread(target=_loop, daemon=True, name="DailyReportScheduler").start()
+    print("[SYSTEM] Daily report scheduler started (fires at 00:05 daily)")
 
 # Background image save queue — offloads cv2.imwrite from the main detection loop
 _image_save_queue = queue.Queue(maxsize=64)
@@ -506,6 +784,13 @@ def init_db():
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('web_password', '3762828')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('retention_days', '30')")
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('offline_threshold_minutes', '5')")
+    # Email report settings
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('email_enabled', '0')")
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('email_smtp_host', 'smtp.gmail.com')")
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('email_smtp_port', '587')")
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('email_smtp_user', '')")
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('email_smtp_pass', '')")
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('email_recipient', '')")
 
     # ── 改進 2: Performance-critical indices (none existed before) ─────────────
     # Without these, every API query does a full O(n) table scan.
@@ -1687,6 +1972,73 @@ class LPRHTTPServerHandler(BaseHTTPRequestHandler):
                 "offline_threshold_minutes": offline_threshold
             }).encode('utf-8'))
 
+        # ── Report API ──────────────────────────────────────────────────────────
+        elif path == "/api/report/download":
+            # Generate (or re-use cached) PDF and stream it to the browser
+            date_str = query.get('date', [datetime.datetime.now().strftime('%Y-%m-%d')])[0].strip()
+            # Basic date format validation
+            import re as _re
+            if not _re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
+                self.send_response(400)
+                self.send_cors_headers()
+                self.end_headers()
+                self.wfile.write(b'Invalid date format (expect YYYY-MM-DD)')
+                return
+            try:
+                pdf_path = generate_daily_report_pdf(date_str)
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/pdf')
+                self.send_header('Content-Disposition',
+                                 f'attachment; filename="report_{date_str}.pdf"')
+                self.send_header('Content-Length', str(os.path.getsize(pdf_path)))
+                self.send_cors_headers()
+                self.end_headers()
+                with open(pdf_path, 'rb') as f:
+                    self.wfile.write(f.read())
+            except Exception as e:
+                self.send_response(500)
+                self.send_header('Content-Type', 'application/json')
+                self.send_cors_headers()
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': str(e)}).encode())
+
+        elif path == "/api/report/send":
+            # Trigger immediate email send for a given date
+            date_str = query.get('date', [datetime.datetime.now().strftime('%Y-%m-%d')])[0].strip()
+            try:
+                pdf_path = generate_daily_report_pdf(date_str)
+                ok, msg  = send_report_email(pdf_path, date_str)
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_cors_headers()
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': ok, 'message': msg}).encode())
+            except Exception as e:
+                self.send_response(500)
+                self.send_header('Content-Type', 'application/json')
+                self.send_cors_headers()
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'message': str(e)}).encode())
+
+        elif path == "/api/settings/email":
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_cors_headers()
+            self.end_headers()
+            conn   = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute("SELECT key, value FROM settings WHERE key LIKE 'email_%'")
+            cfg = {r[0]: r[1] for r in cursor.fetchall()}
+            conn.close()
+            self.wfile.write(json.dumps({
+                'email_enabled':   cfg.get('email_enabled',   '0'),
+                'email_smtp_host': cfg.get('email_smtp_host', 'smtp.gmail.com'),
+                'email_smtp_port': cfg.get('email_smtp_port', '587'),
+                'email_smtp_user': cfg.get('email_smtp_user', ''),
+                'email_smtp_pass': cfg.get('email_smtp_pass', ''),
+                'email_recipient': cfg.get('email_recipient', ''),
+            }).encode())
+
         # 4. Serve Cropped Images
         elif path.startswith("/crops/"):
             filename = os.path.basename(path)
@@ -2193,6 +2545,32 @@ class LPRHTTPServerHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(json.dumps({"success": False, "error": str(e)}).encode('utf-8'))
 
+        elif path == "/api/settings/email/save":
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length).decode('utf-8')
+            try:
+                data = json.loads(post_data)
+                conn   = sqlite3.connect(DB_PATH)
+                cursor = conn.cursor()
+                for key in ('email_enabled', 'email_smtp_host', 'email_smtp_port',
+                            'email_smtp_user', 'email_smtp_pass', 'email_recipient'):
+                    if key in data:
+                        cursor.execute(
+                            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                            (key, str(data[key])))
+                conn.commit(); conn.close()
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_cors_headers()
+                self.end_headers()
+                self.wfile.write(json.dumps({"success": True}).encode())
+            except Exception as e:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_cors_headers()
+                self.end_headers()
+                self.wfile.write(json.dumps({"success": False, "error": str(e)}).encode())
+
     def do_PUT(self):
         """Handle PUT /api/watchlist — edit an existing watchlist entry."""
         # Check HTTP Basic Authentication
@@ -2447,6 +2825,9 @@ def main():
     
     # Start Maintenance Cleanup Thread
     start_maintenance_cleanup_thread()
+
+    # Start Daily Report Scheduler (fires at 00:05 daily)
+    start_daily_report_scheduler()
 
     # Load YOLO Model with OpenVINO on CPU
     # (Intel GPU compiler has bugs with certain layers, causing CISA routine errors and crashes)
