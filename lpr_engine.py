@@ -94,6 +94,65 @@ def reload_auth_cache():
 DISPLAY_W = 640  # MJPEG output width  (same value as before, now a named constant)
 DISPLAY_H = 360  # MJPEG output height (same value as before)
 
+def _deskew_plate(img: np.ndarray) -> np.ndarray:
+    """傾斜矯正：以 HoughLinesP 偵測車牌主要水平線段，用 warpAffine 旋轉對齊。
+
+    Args:
+        img: 已放大的車牌 BGR 影像（建議 128px 高）
+
+    Returns:
+        矯正後的影像。若偵測失敗或角度過小（< 1°）/ 過大（> 25°），
+        直接回傳原始影像（不做修改），確保不引入失真。
+    """
+    try:
+        gray  = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        # Canny 邊緣偵測（低閾值捕捉字符邊緣，高閾值過濾雜訊）
+        edges = cv2.Canny(gray, 40, 120, apertureSize=3)
+
+        # HoughLinesP：偵測線段（機率霍夫變換，比 HoughLines 更快且穩定）
+        lines = cv2.HoughLinesP(
+            edges,
+            rho=1,
+            theta=np.pi / 180,
+            threshold=25,          # 至少要有 25 個投票
+            minLineLength=int(img.shape[1] * 0.25),  # 線段長度 >= 圖寬 25%
+            maxLineGap=8,
+        )
+        if lines is None or len(lines) < 2:
+            return img  # 線段不足，不矯正
+
+        # 收集所有接近水平方向（|angle| < 30°）的線段角度
+        angles = []
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            if x2 == x1:
+                continue  # 垂直線，跳過
+            angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
+            if abs(angle) < 30:
+                angles.append(angle)
+
+        if len(angles) < 2:
+            return img
+
+        # 取中位數避免極端值干擾
+        median_angle = float(np.median(angles))
+
+        # 安全範圍：1° ~ 25°（太小不必矯正；太大可能是偵測錯誤）
+        if abs(median_angle) < 1.0 or abs(median_angle) > 25.0:
+            return img
+
+        h, w = img.shape[:2]
+        M = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), median_angle, 1.0)
+        deskewed = cv2.warpAffine(
+            img, M, (w, h),
+            flags=cv2.INTER_LANCZOS4,
+            borderMode=cv2.BORDER_REPLICATE  # 填充旋轉後的空白區域
+        )
+        return deskewed
+    except Exception as e:
+        print(f"[DESKEW] Error: {e}")
+        return img  # 任何錯誤都回傳原始影像
+
 def _make_display_frame(frame, cam_name, cam_id):
     """Create a display copy of frame with gate indicator and zone polygon overlay."""
     df = frame.copy()
@@ -3483,6 +3542,14 @@ def main():
                         target_w = int(pw * (target_h / ph))
                         enhanced = cv2.resize(cropped_plate_padded, (target_w, target_h),
                                               interpolation=cv2.INTER_LANCZOS4)  # Lanczos > Cubic 於放大
+
+                        # ── 強化 PRE-2b: 傾斜矯正（HoughLinesP + warpAffine）─────────────
+                        # 在放大後、CLAHE 前矯正，像素足夠讓霍夫變換準確偵測線段角度。
+                        # 安全條件：角度需在 1°~25° 之間才矯正，超出範圍原圖傳出。
+                        try:
+                            enhanced = _deskew_plate(enhanced)
+                        except Exception as _de:
+                            print(f"[DESKEW] Skipped: {_de}")
 
                         # ── 強化 PRE-3: CLAHE 對比度強化（亮度通道）────────────────────
                         # (改進 8: reuse cached _clahe object — no allocation per detection)
