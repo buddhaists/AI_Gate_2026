@@ -155,6 +155,55 @@ def _compute_yolo_conf(mean_b: float, std_b: float):
     else:
         return 0.10, "dark"          # 夜間 → 最低閾值
 
+def vote_plate_text(ocr_history: list) -> str:
+    """字符級 OCR 投票：對同一輛車的多幀讀取結果逐字符投票，產生最終車牌字串。
+
+    原理：
+      - ocr_history 是 [(plate_text, ocr_conf), ...] 的列表，來自同一 tracker_id 的
+        所有幀讀取（輕量字串，不含 frame/crop）。
+      - 先決定「主流長度」（出現最多的車牌長度），過濾掉離群長度讀取。
+      - 對每個字符位置，用 ocr_conf 作為加權票，取加權票數最多的字符。
+      - 最終結果比單純取最高 conf 更能抵抗偶發性誤讀（例如 0→O, 1→I）。
+
+    Example:
+      history = [("ABC123",0.72),("ABC123",0.68),("AB0123",0.65),("ABC123",0.70)]
+      → positions: 0=A,1=B,2=C,3=1,4=2,5=3 → "ABC123"  (1 一票 0.65 vs 三票 1 sum=2.1)
+
+    Args:
+        ocr_history: list of (plate_str, conf_float) tuples
+
+    Returns:
+        Voted plate string, or '' if history is empty
+    """
+    if not ocr_history:
+        return ''
+    if len(ocr_history) == 1:
+        return ocr_history[0][0]
+
+    # 1. 決定主流長度（加權：conf 較高的讀取優先）
+    length_weights: dict = {}
+    for text, conf in ocr_history:
+        ln = len(text)
+        length_weights[ln] = length_weights.get(ln, 0.0) + conf
+    majority_len = max(length_weights, key=length_weights.get)
+
+    # 2. 過濾只保留主流長度的讀取
+    filtered = [(t, c) for t, c in ocr_history if len(t) == majority_len]
+    if not filtered:
+        filtered = ocr_history  # fallback：保留全部
+
+    # 3. 逐字符加權投票
+    result_chars = []
+    for pos in range(majority_len):
+        char_votes: dict = {}
+        for text, conf in filtered:
+            if pos < len(text):
+                ch = text[pos]
+                char_votes[ch] = char_votes.get(ch, 0.0) + conf
+        if char_votes:
+            result_chars.append(max(char_votes, key=char_votes.get))
+    return ''.join(result_chars)
+
 # Background image save queue — offloads cv2.imwrite from the main detection loop
 _image_save_queue = queue.Queue(maxsize=64)
 def _image_saver_worker():
@@ -2954,6 +3003,8 @@ def main():
                                 None
                             )
                             if existing_idx is None:
+                                # 改進 OCR-VOTE: 初始化 ocr_history，儲存輕量字串歷史
+                                # （不儲存 frame/crop，純字串+conf，幾乎零 RAM 開銷）
                                 plate_candidates[cam_id].append({
                                     "plate":         cleaned_plate,
                                     "tracker_id":    tracker_id,
@@ -2963,31 +3014,34 @@ def main():
                                     "cropped_plate": cropped_plate.copy(),
                                     # 改進 13: Store frame reference (not .copy()) during accumulation.
                                     # Only the WINNER gets frame.copy() at trigger_window_closing time.
-                                    # Reduces RAM from ~36MB → ~6MB per trigger window (30 frames).
                                     "full_frame":    frame,
                                     "box":           [x1, y1, x2, y2],
                                     "timestamp_str": timestamp_str,
+                                    "ocr_history":   [(cleaned_plate, ocr_conf)],
                                 })
                             else:
                                 existing = plate_candidates[cam_id][existing_idx]
+                                # 改進 OCR-VOTE: 無論 conf 高低，都將本幀 OCR 加入 history
+                                existing["ocr_history"].append((cleaned_plate, ocr_conf))
                                 if combined_conf > existing["combined"]:
-                                    # Better candidate found: update in place (releases old frame ref)
-                                    plate_candidates[cam_id][existing_idx] = {
-                                        "plate":         cleaned_plate,
-                                        "tracker_id":    tracker_id,
-                                        "yolo_conf":     confidence,
-                                        "ocr_conf":      ocr_conf,
-                                        "combined":      combined_conf,
-                                        "cropped_plate": cropped_plate.copy(),
-                                        "full_frame":    frame,  # 改進 13: ref only, not .copy()
-                                        "box":           [x1, y1, x2, y2],
-                                        "timestamp_str": timestamp_str,
-                                    }
-                                # else: existing is already better, skip (do not store new frame)
+                                    # Better candidate found: update frame/crop in place
+                                    existing["plate"]         = cleaned_plate
+                                    existing["yolo_conf"]     = confidence
+                                    existing["ocr_conf"]      = ocr_conf
+                                    existing["combined"]      = combined_conf
+                                    existing["cropped_plate"] = cropped_plate.copy()
+                                    existing["full_frame"]    = frame  # 改進 13: ref only
+                                    existing["box"]           = [x1, y1, x2, y2]
+                                    existing["timestamp_str"] = timestamp_str
+                                # else: frame/crop already best; only ocr_history updated above
                             unique_tids = len(plate_candidates[cam_id])
+                            _hist_len = len(plate_candidates[cam_id][
+                                next(i for i, c in enumerate(plate_candidates[cam_id])
+                                     if c["tracker_id"] == tracker_id)
+                            ]["ocr_history"])
                             print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [CANDIDATE] {cam_name}: {cleaned_plate} "
                                   f"(YOLO={confidence:.2f} OCR={ocr_conf:.2f} combined={combined_conf:.2f}) "
-                                  f"tid={tracker_id} [{unique_tids} unique tracker(s) buffered]")
+                                  f"tid={tracker_id} hist={_hist_len} [{unique_tids} unique tracker(s) buffered]")
 
                 # ── Commit best plate(s) when trigger window closes ───────────
                 if trigger_window_closing:
@@ -3021,16 +3075,28 @@ def main():
                         }
 
                         # ── Per tracker_id: commit best candidate ─────────────
-                        # 改進 9: Multi-candidate voting — plates seen more often across
-                        # frames get a +0.15 bonus per extra occurrence, so a consistently
-                        # read string beats a single lucky high-confidence misread.
-                        # Counter imported at module top.
+                        # 改進 OCR-VOTE: 字符級加權投票取代舊有的 +0.15 頻次加成。
+                        # 由於每個 tracker_id 已在 ocr_history 中累積所有幀讀取，
+                        # vote_plate_text() 可對每個字符位置獨立投票，有效消除
+                        # 偶發性誤讀（0→O、1→I、B→8 等常見 OCR 混淆字符）。
                         for tid, track_cands in by_track.items():
-                            vote_counts = Counter(c["plate"] for c in track_cands)
-                            for c in track_cands:
-                                c["combined"] += vote_counts[c["plate"]] * 0.15
                             best = max(track_cands, key=lambda c: c["combined"])
-                            cleaned_plate = best["plate"]
+
+                            # 收集此 tracker_id 的完整 OCR 歷史（跨所有幀）
+                            all_ocr_history = []
+                            for c in track_cands:
+                                all_ocr_history.extend(c.get("ocr_history", [(c["plate"], c["ocr_conf"])]))
+
+                            # 字符級投票產生最終車牌
+                            voted_plate = vote_plate_text(all_ocr_history)
+                            raw_best    = best["plate"]  # 保留原始最佳供 log 比對
+
+                            # 若投票結果非空且合理長度，採用投票結果
+                            if voted_plate and 3 <= len(voted_plate) <= 10:
+                                cleaned_plate = voted_plate
+                            else:
+                                cleaned_plate = raw_best  # fallback
+
                             ocr_conf      = best["ocr_conf"]
                             confidence_b  = best["yolo_conf"]
                             cropped_plate = best["cropped_plate"]
@@ -3039,9 +3105,10 @@ def main():
                             timestamp_str = best["timestamp_str"]
                             x1, y1, x2, y2 = box_b
 
+                            vote_note = f"voted='{voted_plate}'" if voted_plate != raw_best else "voted=same"
                             print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [BEST-PLATE] {cam_name}: "
-                                  f"tid={tid} '{cleaned_plate}' from {len(track_cands)} candidates "
-                                  f"(YOLO={confidence_b:.2f} OCR={ocr_conf:.2f} combined={best['combined']:.2f})")
+                                  f"tid={tid} '{cleaned_plate}' hist={len(all_ocr_history)} {vote_note} "
+                                  f"(YOLO={confidence_b:.2f} OCR={ocr_conf:.2f})")
 
                             # ── Duplicate check 1: ByteTrack tracker_id lookup ─
                             is_duplicate  = False
