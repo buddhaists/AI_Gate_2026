@@ -426,8 +426,52 @@ def generate_daily_report_pdf(date_str: str) -> str:
     return pdf_path
 
 
-def send_report_email(pdf_path: str, date_str: str) -> tuple:
+def _smtp_connect(smtp_host, smtp_port, smtp_user, smtp_pass):
+    """建立 SMTP 連線並登入，自動選擇 SSL(465) 或 STARTTLS(587/25)。"""
+    import smtplib
+    if smtp_port == 465:
+        # SSL 直接連線
+        server = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=15)
+        server.ehlo()
+    else:
+        # STARTTLS（587 / 25）
+        server = smtplib.SMTP(smtp_host, smtp_port, timeout=15)
+        server.ehlo()
+        server.starttls()
+        server.ehlo()
+    server.login(smtp_user, smtp_pass)
+    return server
+
+
+def _translate_smtp_error(e: Exception) -> str:
+    """將常見 SMTP 例外轉換為繁體中文說明。"""
+    msg = str(e)
+    if '534' in msg or '5.7.9' in msg:
+        return ('Gmail 需要應用程式密碼（App Password）\n'
+                '→ 請至 myaccount.google.com/apppasswords 產生 16 碼應用程式密碼，'
+                '不可使用一般 Gmail 登入密碼。')
+    if '535' in msg or '5.7.8' in msg:
+        return '帳號或密碼錯誤（535）。請確認寄件帳號與應用程式密碼是否正確。'
+    if '534' in msg and 'less secure' in msg:
+        return '請至 Google 帳戶開啟「低安全性應用程式存取」或改用應用程式密碼。'
+    if 'getaddrinfo' in msg or 'nodename' in msg.lower():
+        return f'找不到 SMTP 伺服器 "{msg}"，請確認 SMTP 主機設定是否正確。'
+    if 'timed out' in msg.lower() or 'timeout' in msg.lower():
+        return f'連線逾時（Timeout）。請確認 SMTP 主機與 Port 是否正確，或防火牆是否允許對外發信。'
+    if '421' in msg or '450' in msg:
+        return f'SMTP 伺服器暫時拒絕連線（{msg[:60]}），請稍後再試。'
+    if 'SSL' in msg or 'ssl' in msg:
+        return f'SSL/TLS 連線失敗。請嘗試改用 Port 465（SSL）或 587（STARTTLS）。'
+    return f'發送失敗：{msg}'
+
+
+def send_report_email(pdf_path: str, date_str: str, recipient_override: str = '') -> tuple:
     """以 SMTP 發送每日報表 PDF 至設定的收件人。
+
+    Args:
+        pdf_path: PDF 檔案路徑
+        date_str: 報表日期 'YYYY-MM-DD'
+        recipient_override: 若提供，覆蓋資料庫中的收件人
 
     Returns:
         (success: bool, message: str)
@@ -448,10 +492,16 @@ def send_report_email(pdf_path: str, date_str: str) -> tuple:
     smtp_port = int(cfg.get('email_smtp_port', '587') or '587')
     smtp_user = cfg.get('email_smtp_user', '')
     smtp_pass = cfg.get('email_smtp_pass', '')
-    recipient = cfg.get('email_recipient', '')
+    recipient = recipient_override or cfg.get('email_recipient', '')
 
-    if not all([smtp_host, smtp_user, smtp_pass, recipient]):
-        return False, 'Email 設定不完整，請至「設定」頁面填寫 SMTP 資訊'
+    # 檢查必填設定
+    missing = []
+    if not smtp_host: missing.append('SMTP 主機')
+    if not smtp_user: missing.append('寄件帳號')
+    if not smtp_pass: missing.append('應用程式密碼')
+    if not recipient: missing.append('收件人 Email')
+    if missing:
+        return False, f'以下設定尚未填寫：{", ".join(missing)}。請至「設定 → Email 報表 → 進階 SMTP 設定」完成設定。'
 
     msg              = MIMEMultipart()
     msg['From']      = smtp_user
@@ -471,17 +521,14 @@ def send_report_email(pdf_path: str, date_str: str) -> tuple:
         msg.attach(part)
 
     try:
-        server = smtplib.SMTP(smtp_host, smtp_port, timeout=15)
-        server.ehlo()
-        server.starttls()
-        server.login(smtp_user, smtp_pass)
+        server = _smtp_connect(smtp_host, smtp_port, smtp_user, smtp_pass)
         server.sendmail(smtp_user, [recipient], msg.as_string())
         server.quit()
         print(f"[REPORT] Email sent to {recipient} for {date_str}")
-        return True, f'報表已成功發送至 {recipient}'
+        return True, f'✅ 報表已成功發送至 {recipient}'
     except Exception as e:
         print(f"[REPORT] Email error: {e}")
-        return False, f'發送失敗：{e}'
+        return False, _translate_smtp_error(e)
 
 
 def start_daily_report_scheduler():
@@ -2570,6 +2617,31 @@ class LPRHTTPServerHandler(BaseHTTPRequestHandler):
                 self.send_cors_headers()
                 self.end_headers()
                 self.wfile.write(json.dumps({"success": False, "error": str(e)}).encode())
+
+        elif path == "/api/report/test-smtp":
+            # 測試 SMTP 連線（不實際發信，只驗證帳號密碼）
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length).decode('utf-8')
+            try:
+                data      = json.loads(post_data)
+                smtp_host = data.get('email_smtp_host', '').strip()
+                smtp_port = int(data.get('email_smtp_port', 587) or 587)
+                smtp_user = data.get('email_smtp_user', '').strip()
+                smtp_pass = data.get('email_smtp_pass', '').strip()
+                if not all([smtp_host, smtp_user, smtp_pass]):
+                    raise ValueError('SMTP 主機、帳號、密碼均為必填')
+                server = _smtp_connect(smtp_host, smtp_port, smtp_user, smtp_pass)
+                server.quit()
+                ok  = True
+                msg = f'✅ SMTP 連線成功！帳號 {smtp_user} 驗證通過，可以正常發信。'
+            except Exception as e:
+                ok  = False
+                msg = _translate_smtp_error(e)
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_cors_headers()
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': ok, 'message': msg}).encode())
 
     def do_PUT(self):
         """Handle PUT /api/watchlist — edit an existing watchlist entry."""

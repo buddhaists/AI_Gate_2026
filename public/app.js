@@ -1933,6 +1933,59 @@ async function saveEmailEnabled(checkbox) {
     } catch { showToast('儲存失敗', 'error'); }
 }
 
+// 測試 SMTP 連線（不發信，只驗證帳號密碼）
+async function testSmtp() {
+    const btn    = document.getElementById('btn-test-smtp');
+    const result = document.getElementById('smtp-test-result');
+    const payload = {
+        email_smtp_host: document.getElementById('email-smtp-host')?.value.trim() || '',
+        email_smtp_port: document.getElementById('email-smtp-port')?.value.trim() || '587',
+        email_smtp_user: document.getElementById('email-smtp-user')?.value.trim() || '',
+        email_smtp_pass: document.getElementById('email-smtp-pass')?.value.trim() || '',
+    };
+    if (!payload.email_smtp_host || !payload.email_smtp_user || !payload.email_smtp_pass) {
+        if (result) {
+            result.style.display = 'block';
+            result.style.background = 'rgba(239,68,68,0.10)';
+            result.style.border = '1px solid rgba(239,68,68,0.25)';
+            result.style.color = '#fca5a5';
+            result.textContent = '⚠️ 請先填寫 SMTP 主機、寄件帳號與應用程式密碼';
+        }
+        return;
+    }
+    if (btn) { btn.disabled = true; btn.innerHTML = '⏳ 測試中…'; }
+    try {
+        const res  = await fetch('/api/report/test-smtp', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (result) {
+            result.style.display = 'block';
+            if (data.success) {
+                result.style.background = 'rgba(34,197,94,0.10)';
+                result.style.border = '1px solid rgba(34,197,94,0.25)';
+                result.style.color = '#86efac';
+            } else {
+                result.style.background = 'rgba(239,68,68,0.10)';
+                result.style.border = '1px solid rgba(239,68,68,0.25)';
+                result.style.color = '#fca5a5';
+            }
+            result.textContent = data.message || (data.success ? '連線成功' : '連線失敗');
+        }
+    } catch {
+        if (result) {
+            result.style.display = 'block';
+            result.style.background = 'rgba(239,68,68,0.10)';
+            result.style.border = '1px solid rgba(239,68,68,0.25)';
+            result.style.color = '#fca5a5';
+            result.textContent = '❌ 無法連接至伺服器，請確認系統正在運行';
+        }
+    } finally {
+        if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-plug-circle-check"></i> 測試連線'; }
+    }
+}
+
 // 顯示/隱藏密碼切換
 function togglePassVis() {
     const inp = document.getElementById('email-smtp-pass');

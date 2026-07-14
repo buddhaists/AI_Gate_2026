@@ -639,10 +639,22 @@
                                     </span>
                                 </div>
 
-                                <button type="submit" class="btn btn-primary" style="height:42px;justify-content:center;
-                                        background:linear-gradient(135deg,#1e3a5f,#2d6a9f);">
+                                <div style="display:flex;gap:10px;">
+                                <button type="submit" class="btn btn-primary" style="height:42px;flex:1;justify-content:center;background:linear-gradient(135deg,#1e3a5f,#2d6a9f);">
                                     <i class="fa-solid fa-floppy-disk"></i> 儲存 SMTP 設定
                                 </button>
+                                <button type="button" id="btn-test-smtp" onclick="testSmtp()"
+                                        style="height:42px;padding:0 16px;border-radius:7px;
+                                               border:1px solid rgba(255,255,255,0.15);
+                                               background:rgba(255,255,255,0.06);color:var(--text-primary);
+                                               font-size:13px;font-weight:600;cursor:pointer;
+                                               white-space:nowrap;display:flex;align-items:center;gap:6px;">
+                                    <i class="fa-solid fa-plug-circle-check"></i> 測試連線
+                                </button>
+                            </div>
+                            <div id="smtp-test-result" style="display:none;margin-top:10px;
+                                 padding:10px 14px;border-radius:7px;font-size:12px;
+                                 line-height:1.7;font-weight:500;"></div>
                             </div>
                         </form>
                     </div>
