@@ -51,6 +51,24 @@ os.makedirs(PUBLIC_DIR, exist_ok=True)
 latest_display_frames = {} # Key: camera_id (int), Value: JPEG bytes (compressed frame)
 frame_lock = threading.Lock()
 video_capture_lock = threading.Lock()
+readers_lock = threading.Lock()  # Guards active_readers dict across threads
+
+# Background image save queue — offloads cv2.imwrite from the main detection loop
+_image_save_queue = queue.Queue(maxsize=64)
+def _image_saver_worker():
+    while True:
+        item = _image_save_queue.get()
+        if item is None:
+            break
+        path, img = item
+        try:
+            cv2.imwrite(path, img)
+        except Exception as e:
+            print(f"[SYSTEM] Image save error for {path}: {e}")
+        finally:
+            _image_save_queue.task_done()
+_image_saver_thread = threading.Thread(target=_image_saver_worker, daemon=True)
+_image_saver_thread.start()
 
 # ── Gate Zone Polygons (module-level for HTTP handler access) ─────────────────
 # Coordinates are in full-frame pixels (1920×1080).
@@ -363,14 +381,15 @@ def sync_active_readers():
     active_ids = {r[0] for r in active_cameras}
 
     # Stop readers that are no longer active first
-    for cam_id in list(active_readers.keys()):
-        if cam_id not in active_ids:
-            print(f"[SYSTEM] Stopping reader for camera ID: {cam_id}")
-            active_readers[cam_id].stop()
-            active_readers.pop(cam_id, None)
-            active_camera_names.pop(cam_id, None)
-            with frame_lock:
-                latest_display_frames.pop(cam_id, None)
+    with readers_lock:
+        for cam_id in list(active_readers.keys()):
+            if cam_id not in active_ids:
+                print(f"[SYSTEM] Stopping reader for camera ID: {cam_id}")
+                active_readers[cam_id].stop()
+                active_readers.pop(cam_id, None)
+                active_camera_names.pop(cam_id, None)
+                with frame_lock:
+                    latest_display_frames.pop(cam_id, None)
 
     # Start or update active readers
     for cam_id, name, url in active_cameras:
@@ -384,7 +403,8 @@ def sync_active_readers():
             print(f"[SYSTEM] Starting reader for camera: {name} (ID: {cam_id})")
             reader = RTSPVideoReader(sanitized_url, cam_id=cam_id, name=name)
             reader.start()
-            active_readers[cam_id] = reader
+            with readers_lock:
+                active_readers[cam_id] = reader
 
 # YOLO Model Path
 MODEL_PATH = "yolov8n_lpr_openvino_model"  # OpenVINO format for Intel UHD 630 GPU inference
@@ -2173,6 +2193,14 @@ def main():
     camera_save_cooldown = {}  # Key: cam_id, Value: timestamp of last save
     SAVE_COOLDOWN_SECONDS = 6.0  # 6 seconds per camera after any successful save
 
+    # Persistent SQLite connection with WAL mode for lower per-commit overhead.
+    # All DB writes in the main loop use this connection + db_write_lock.
+    db_conn_persistent = sqlite3.connect(DB_PATH, check_same_thread=False)
+    db_conn_persistent.execute("PRAGMA journal_mode=WAL")
+    db_conn_persistent.execute("PRAGMA synchronous=NORMAL")
+    db_conn_persistent.execute("PRAGMA cache_size=-8000")  # 8MB page cache
+    db_write_lock = threading.Lock()
+
     print("AI LPR Engine started successfully. Monitoring stream...")
     
     # Frame counts per camera
@@ -2231,7 +2259,8 @@ def main():
                 system_enabled = True
 
             processed_any = False
-            cam_ids = list(active_readers.keys())
+            with readers_lock:
+                cam_ids = list(active_readers.keys())
 
             for cam_id in cam_ids:
                 reader = active_readers.get(cam_id)
@@ -2639,23 +2668,48 @@ def main():
                             combined_conf = round(confidence + ocr_conf, 4)  # YOLO conf + OCR conf
                             timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 
+                            # Only keep the best candidate per tracker_id to limit RAM usage.
+                            # Full 1080p frames are expensive; we only store the top-scoring one.
                             if cam_id not in plate_candidates:
                                 plate_candidates[cam_id] = []
 
-                            plate_candidates[cam_id].append({
-                                "plate":         cleaned_plate,
-                                "tracker_id":    tracker_id,       # sv.ByteTrack id
-                                "yolo_conf":     confidence,
-                                "ocr_conf":      ocr_conf,
-                                "combined":      combined_conf,
-                                "cropped_plate": cropped_plate.copy(),
-                                "full_frame":    frame.copy(),
-                                "box":           [x1, y1, x2, y2],
-                                "timestamp_str": timestamp_str,
-                            })
+                            existing_idx = next(
+                                (i for i, c in enumerate(plate_candidates[cam_id])
+                                 if c["tracker_id"] == tracker_id),
+                                None
+                            )
+                            if existing_idx is None:
+                                plate_candidates[cam_id].append({
+                                    "plate":         cleaned_plate,
+                                    "tracker_id":    tracker_id,
+                                    "yolo_conf":     confidence,
+                                    "ocr_conf":      ocr_conf,
+                                    "combined":      combined_conf,
+                                    "cropped_plate": cropped_plate.copy(),
+                                    "full_frame":    frame.copy(),
+                                    "box":           [x1, y1, x2, y2],
+                                    "timestamp_str": timestamp_str,
+                                })
+                            else:
+                                existing = plate_candidates[cam_id][existing_idx]
+                                if combined_conf > existing["combined"]:
+                                    # Better candidate found: update in place (releases old frame ref)
+                                    plate_candidates[cam_id][existing_idx] = {
+                                        "plate":         cleaned_plate,
+                                        "tracker_id":    tracker_id,
+                                        "yolo_conf":     confidence,
+                                        "ocr_conf":      ocr_conf,
+                                        "combined":      combined_conf,
+                                        "cropped_plate": cropped_plate.copy(),
+                                        "full_frame":    frame.copy(),
+                                        "box":           [x1, y1, x2, y2],
+                                        "timestamp_str": timestamp_str,
+                                    }
+                                # else: existing is already better, skip (do not store new frame)
+                            unique_tids = len(plate_candidates[cam_id])
                             print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [CANDIDATE] {cam_name}: {cleaned_plate} "
                                   f"(YOLO={confidence:.2f} OCR={ocr_conf:.2f} combined={combined_conf:.2f}) "
-                                  f"tid={tracker_id} [{len(plate_candidates[cam_id])} buffered]")
+                                  f"tid={tracker_id} [{unique_tids} unique tracker(s) buffered]")
 
                 # ── Commit best plate(s) when trigger window closes ───────────
                 if trigger_window_closing:
@@ -2720,33 +2774,32 @@ def main():
                                     new_v_type = classify_vehicle_type(cleaned_plate)
                                     if det_id:
                                         try:
-                                            db_conn = sqlite3.connect(DB_PATH)
-                                            cursor  = db_conn.cursor()
-                                            cursor.execute(
-                                                "UPDATE detections SET plate_number = ?, confidence = ?, vehicle_type = ? WHERE id = ?",
-                                                (cleaned_plate, round(ocr_conf, 2), new_v_type, det_id)
-                                            )
-                                            cursor.execute("DELETE FROM alerts WHERE detection_id = ?", (det_id,))
-                                            cursor.execute("SELECT category, description FROM watchlist WHERE plate_number = ?", (cleaned_plate,))
-                                            watch_res = cursor.fetchone()
-                                            cursor.execute("SELECT COUNT(*) FROM watchlist WHERE plate_number = ?", (old_plate,))
-                                            was_old_alerted = cursor.fetchone()[0] > 0
-                                            if watch_res:
-                                                watch_category, watch_description = watch_res
-                                                action_status, should_suppress = determine_watchlist_action_and_check_suppression(cursor, cleaned_plate)
-                                                if not should_suppress:
-                                                    cursor.execute(
-                                                        "INSERT INTO alerts (detection_id, plate_number, category, description, camera_id, action) VALUES (?, ?, ?, ?, ?, ?)",
-                                                        (det_id, cleaned_plate, watch_category, watch_description, cam_id, action_status)
-                                                    )
-                                                    if not was_old_alerted:
-                                                        cursor.execute("SELECT crop_image_path FROM detections WHERE id = ?", (det_id,))
-                                                        crop_res  = cursor.fetchone()
-                                                        crop_file = crop_res[0] if crop_res else ""
-                                                        if crop_file:
-                                                            send_telegram_notification_async(cleaned_plate, watch_category, watch_description, cam_name, crop_file, action_status)
-                                            db_conn.commit()
-                                            db_conn.close()
+                                            with db_write_lock:
+                                                cursor  = db_conn_persistent.cursor()
+                                                cursor.execute(
+                                                    "UPDATE detections SET plate_number = ?, confidence = ?, vehicle_type = ? WHERE id = ?",
+                                                    (cleaned_plate, round(ocr_conf, 2), new_v_type, det_id)
+                                                )
+                                                cursor.execute("DELETE FROM alerts WHERE detection_id = ?", (det_id,))
+                                                cursor.execute("SELECT category, description FROM watchlist WHERE plate_number = ?", (cleaned_plate,))
+                                                watch_res = cursor.fetchone()
+                                                cursor.execute("SELECT COUNT(*) FROM watchlist WHERE plate_number = ?", (old_plate,))
+                                                was_old_alerted = cursor.fetchone()[0] > 0
+                                                if watch_res:
+                                                    watch_category, watch_description = watch_res
+                                                    action_status, should_suppress = determine_watchlist_action_and_check_suppression(cursor, cleaned_plate)
+                                                    if not should_suppress:
+                                                        cursor.execute(
+                                                            "INSERT INTO alerts (detection_id, plate_number, category, description, camera_id, action) VALUES (?, ?, ?, ?, ?, ?)",
+                                                            (det_id, cleaned_plate, watch_category, watch_description, cam_id, action_status)
+                                                        )
+                                                        if not was_old_alerted:
+                                                            cursor.execute("SELECT crop_image_path FROM detections WHERE id = ?", (det_id,))
+                                                            crop_res  = cursor.fetchone()
+                                                            crop_file = crop_res[0] if crop_res else ""
+                                                            if crop_file:
+                                                                send_telegram_notification_async(cleaned_plate, watch_category, watch_description, cam_name, crop_file, action_status)
+                                                db_conn_persistent.commit()
                                             print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [TRACK] Updated tid={tid} on {cam_name}: {old_plate} -> {cleaned_plate} (Conf: {round(ocr_conf, 2)})")
                                         except Exception as e:
                                             print(f"Error updating tracked plate: {e}")
@@ -2781,36 +2834,35 @@ def main():
                             crop_path     = os.path.join(CROPS_DIR, crop_filename)
                             full_path     = os.path.join(FULLS_DIR, full_filename)
 
-                            cv2.imwrite(crop_path, cropped_plate)
-                            cv2.imwrite(full_path, frame_b)
+                            _image_save_queue.put((crop_path, cropped_plate))
+                            _image_save_queue.put((full_path, frame_b))
 
-                            db_conn = sqlite3.connect(DB_PATH)
-                            cursor  = db_conn.cursor()
-                            cursor.execute(
-                                "INSERT INTO detections (plate_number, confidence, crop_image_path, full_image_path, vehicle_type, camera_id) "
-                                "VALUES (?, ?, ?, ?, ?, ?)",
-                                (cleaned_plate, round(ocr_conf, 2), crop_filename, full_filename, v_type, cam_id)
-                            )
-                            detection_id = cursor.lastrowid
+                            with db_write_lock:
+                                cursor  = db_conn_persistent.cursor()
+                                cursor.execute(
+                                    "INSERT INTO detections (plate_number, confidence, crop_image_path, full_image_path, vehicle_type, camera_id) "
+                                    "VALUES (?, ?, ?, ?, ?, ?)",
+                                    (cleaned_plate, round(ocr_conf, 2), crop_filename, full_filename, v_type, cam_id)
+                                )
+                                detection_id = cursor.lastrowid
 
-                            cursor.execute("SELECT category, description FROM watchlist WHERE plate_number = ?", (cleaned_plate,))
-                            watch_res = cursor.fetchone()
-                            if watch_res:
-                                watch_category, watch_description = watch_res
-                                action_status, should_suppress = determine_watchlist_action_and_check_suppression(cursor, cleaned_plate)
-                                if not should_suppress:
-                                    cursor.execute(
-                                        "INSERT INTO alerts (detection_id, plate_number, category, description, camera_id, action) VALUES (?, ?, ?, ?, ?, ?)",
-                                        (detection_id, cleaned_plate, watch_category, watch_description, cam_id, action_status)
-                                    )
-                                    print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] !!! ALERT !!! Tracked Vehicle {cleaned_plate} "
-                                          f"({watch_category}) [{action_status}] detected on {cam_name}: {watch_description}")
-                                    send_telegram_notification_async(cleaned_plate, watch_category, watch_description, cam_name, crop_filename, action_status)
-                                else:
-                                    print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Watchlist Vehicle {cleaned_plate} detected but suppressed (duplicate within 3 min).")
+                                cursor.execute("SELECT category, description FROM watchlist WHERE plate_number = ?", (cleaned_plate,))
+                                watch_res = cursor.fetchone()
+                                if watch_res:
+                                    watch_category, watch_description = watch_res
+                                    action_status, should_suppress = determine_watchlist_action_and_check_suppression(cursor, cleaned_plate)
+                                    if not should_suppress:
+                                        cursor.execute(
+                                            "INSERT INTO alerts (detection_id, plate_number, category, description, camera_id, action) VALUES (?, ?, ?, ?, ?, ?)",
+                                            (detection_id, cleaned_plate, watch_category, watch_description, cam_id, action_status)
+                                        )
+                                        print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] !!! ALERT !!! Tracked Vehicle {cleaned_plate} "
+                                              f"({watch_category}) [{action_status}] detected on {cam_name}: {watch_description}")
+                                        send_telegram_notification_async(cleaned_plate, watch_category, watch_description, cam_name, crop_filename, action_status)
+                                    else:
+                                        print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Watchlist Vehicle {cleaned_plate} detected but suppressed (duplicate within 3 min).")
 
-                            db_conn.commit()
-                            db_conn.close()
+                                db_conn_persistent.commit()
 
                             # ── Register in ByteTrack record table ───────────
                             tracked_by_id[cam_id][tid] = {
