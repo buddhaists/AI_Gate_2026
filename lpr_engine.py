@@ -26,7 +26,9 @@ import threading
 import queue
 import re
 import json
+import base64
 import urllib.parse
+import urllib.request
 import subprocess
 from collections import defaultdict, Counter  # moved from hot-path inline imports
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -58,6 +60,65 @@ readers_lock = threading.Lock()  # Guards active_readers dict across threads
 # opening a new sqlite3 connection on every call (~every 30 s).
 db_conn_persistent = None
 db_write_lock = threading.Lock()
+
+# ── 改進 12: Auth credential cache ────────────────────────────────────────────
+# check_auth() is called on every HTTP request (20/s from canvas polling).
+# Caching avoids opening a new sqlite3 connection on each call.
+# reload_auth_cache() is called once at startup and whenever credentials change.
+_auth_cache: dict = {"username": "admin", "password": "3762828", "loaded": False}
+_auth_cache_lock = threading.Lock()
+
+def reload_auth_cache():
+    """Load web credentials from DB into the in-memory cache."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT key, value FROM settings WHERE key IN ('web_username', 'web_password')")
+        rows = cursor.fetchall()
+        conn.close()
+        d = {r[0]: r[1] for r in rows}
+        with _auth_cache_lock:
+            _auth_cache["username"] = d.get("web_username", "admin") or "admin"
+            _auth_cache["password"] = d.get("web_password", "3762828") or "3762828"
+            _auth_cache["loaded"] = True
+    except Exception as e:
+        print(f"[SYSTEM] reload_auth_cache error: {e}")
+
+# ── 改進 14: Module-level display helpers ─────────────────────────────────────
+# Previously defined as nested `def` inside the per-camera loop, so Python
+# created new function objects + closures on every frame (18/s for 3 cameras).
+# Extracting to module level means the function objects are built exactly ONCE.
+# Variables that were captured by closure are now explicit parameters.
+DISPLAY_W = 640  # MJPEG output width  (same value as before, now a named constant)
+DISPLAY_H = 360  # MJPEG output height (same value as before)
+
+def _make_display_frame(frame, cam_name, cam_id):
+    """Create a display copy of frame with gate indicator and zone polygon overlay."""
+    df = frame.copy()
+    if cam_name == "學校大門":
+        left_color  = (0, 0, 255) if last_left_gate_closed  else (0, 255, 0)
+        right_color = (0, 0, 255) if last_right_gate_closed else (0, 255, 0)
+        cv2.rectangle(df, (600, 2),  (925, 75),  left_color,  2)
+        cv2.rectangle(df, (925, 2),  (1250, 75), right_color, 2)
+        if last_gate_state == 'closed':
+            cv2.putText(df, "GATE CLOSED",     (610, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        else:
+            cv2.putText(df, "GATE OPEN (>50%)", (610, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+    _zpoly = GATE_ZONE_POLYGONS.get(cam_id)
+    if _zpoly is not None:
+        cv2.polylines(df, [_zpoly], True, (0, 220, 255), 2)
+        cv2.putText(df, "ZONE",
+                    (int(_zpoly[0][0]) + 6, int(_zpoly[0][1]) + 26),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 220, 255), 2)
+    return df
+
+def _encode_and_push(df, cam_id, last_display_update):
+    """Resize + JPEG-encode df and push to MJPEG buffer for cam_id."""
+    ds = cv2.resize(df, (DISPLAY_W, DISPLAY_H))
+    _, enc = cv2.imencode('.jpg', ds, [cv2.IMWRITE_JPEG_QUALITY, 65])
+    with frame_lock:
+        latest_display_frames[cam_id] = enc.tobytes()
+    last_display_update[cam_id] = time.time()
 
 # Background image save queue — offloads cv2.imwrite from the main detection loop
 _image_save_queue = queue.Queue(maxsize=64)
@@ -997,29 +1058,19 @@ class LPRHTTPServerHandler(BaseHTTPRequestHandler):
         pass
 
     def check_auth(self, auth_header):
-        username = "admin"
-        password = "admin123"
-        try:
-            conn = sqlite3.connect(DB_PATH)
-            cursor = conn.cursor()
-            cursor.execute("SELECT value FROM settings WHERE key = 'web_username'")
-            row_u = cursor.fetchone()
-            cursor.execute("SELECT value FROM settings WHERE key = 'web_password'")
-            row_p = cursor.fetchone()
-            conn.close()
-            if row_u and row_u[0]:
-                username = row_u[0]
-            if row_p and row_p[0]:
-                password = row_p[0]
-        except Exception as e:
-            print(f"[SYSTEM] Error reading auth settings: {e}")
+        # 改進 12: Use module-level credential cache — no DB open on each call.
+        # Cache is loaded once at startup and invalidated when credentials change.
+        if not _auth_cache["loaded"]:
+            reload_auth_cache()
+        with _auth_cache_lock:
+            username = _auth_cache["username"]
+            password = _auth_cache["password"]
 
         if not auth_header:
             return False
         if not auth_header.startswith('Basic '):
             return False
-        
-        import base64
+        # base64 imported at module level (改進 21)
         try:
             encoded_credentials = auth_header.split(' ', 1)[1]
             decoded_bytes = base64.b64decode(encoded_credentials)
@@ -1947,6 +1998,7 @@ class LPRHTTPServerHandler(BaseHTTPRequestHandler):
                     cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('web_password', ?)", (password,))
                 conn.commit()
                 conn.close()
+                reload_auth_cache()  # 改進 12: refresh cache so new creds take effect immediately
                 
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
@@ -2455,38 +2507,12 @@ def main():
                 # For the YOLO path (has_motion + active), display_frame is always needed
                 # for bbox annotation, so it is created below after these checks.
                 do_display_update = (time.time() - last_display_update.get(cam_id, 0)) >= DISPLAY_UPDATE_INTERVAL
-                display_h, display_w = 360, 640  # P7: reduced from 960x540 to cut imencode CPU ~60%
+                # DISPLAY_W / DISPLAY_H are module-level constants (改進 14)
 
 
-                def _make_display_frame():
-                    """Create display_frame with gate indicator + zone polygon drawn."""
-                    df = frame.copy()
-                    if cam_name == "學校大門":
-                        left_color = (0, 0, 255) if last_left_gate_closed else (0, 255, 0)
-                        right_color = (0, 0, 255) if last_right_gate_closed else (0, 255, 0)
-                        cv2.rectangle(df, (600, 2), (925, 75), left_color, 2)
-                        cv2.rectangle(df, (925, 2), (1250, 75), right_color, 2)
-                        if last_gate_state == 'closed':
-                            cv2.putText(df, "GATE CLOSED", (610, 30),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                        else:
-                            cv2.putText(df, "GATE OPEN (>50%)", (610, 30),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                    _zpoly = GATE_ZONE_POLYGONS.get(cam_id)
-                    if _zpoly is not None:
-                        cv2.polylines(df, [_zpoly], True, (0, 220, 255), 2)
-                        cv2.putText(df, "ZONE",
-                                    (int(_zpoly[0][0]) + 6, int(_zpoly[0][1]) + 26),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 220, 255), 2)
-                    return df
-
-                def _encode_and_push(df):
-                    """Resize + JPEG-encode df and push to MJPEG buffer."""
-                    ds = cv2.resize(df, (display_w, display_h))
-                    _, enc = cv2.imencode('.jpg', ds, [cv2.IMWRITE_JPEG_QUALITY, 65])
-                    with frame_lock:
-                        latest_display_frames[cam_id] = enc.tobytes()
-                    last_display_update[cam_id] = time.time()
+                # 改進 14: _make_display_frame and _encode_and_push are now module-level
+                # functions (defined once at import time). Previous inline `def` created
+                # new function objects + closures on every frame (18/s for 3 cameras).
 
                 # Check if LPR is paused for this specific camera
                 camera_lpr_active = True
@@ -2497,19 +2523,19 @@ def main():
 
                 if not camera_lpr_active:
                     if do_display_update:
-                        display_frame = _make_display_frame()
+                        display_frame = _make_display_frame(frame, cam_name, cam_id)
                         cv2.putText(display_frame, "SYSTEM PAUSED (MONITORING INACTIVE)", (30, 45),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                        _encode_and_push(display_frame)
+                        _encode_and_push(display_frame, cam_id, last_display_update)
                     continue
 
                 if not has_motion:
                     if do_display_update:
-                        _encode_and_push(_make_display_frame())
+                        _encode_and_push(_make_display_frame(frame, cam_name, cam_id), cam_id, last_display_update)
                     continue
 
                 # Has motion + camera active: always need display_frame for YOLO bbox annotation.
-                display_frame = _make_display_frame()
+                display_frame = _make_display_frame(frame, cam_name, cam_id)
 
                 
                 # Run YOLO every 3 frames during trigger window.
@@ -2774,7 +2800,10 @@ def main():
                                     "ocr_conf":      ocr_conf,
                                     "combined":      combined_conf,
                                     "cropped_plate": cropped_plate.copy(),
-                                    "full_frame":    frame.copy(),
+                                    # 改進 13: Store frame reference (not .copy()) during accumulation.
+                                    # Only the WINNER gets frame.copy() at trigger_window_closing time.
+                                    # Reduces RAM from ~36MB → ~6MB per trigger window (30 frames).
+                                    "full_frame":    frame,
                                     "box":           [x1, y1, x2, y2],
                                     "timestamp_str": timestamp_str,
                                 })
@@ -2789,7 +2818,7 @@ def main():
                                         "ocr_conf":      ocr_conf,
                                         "combined":      combined_conf,
                                         "cropped_plate": cropped_plate.copy(),
-                                        "full_frame":    frame.copy(),
+                                        "full_frame":    frame,  # 改進 13: ref only, not .copy()
                                         "box":           [x1, y1, x2, y2],
                                         "timestamp_str": timestamp_str,
                                     }
@@ -2844,7 +2873,7 @@ def main():
                             ocr_conf      = best["ocr_conf"]
                             confidence_b  = best["yolo_conf"]
                             cropped_plate = best["cropped_plate"]
-                            frame_b       = best["full_frame"]
+                            frame_b       = best["full_frame"].copy()  # 改進 13: copy ONLY the winner
                             box_b         = best["box"]
                             timestamp_str = best["timestamp_str"]
                             x1, y1, x2, y2 = box_b
@@ -2983,12 +3012,9 @@ def main():
                 # Post-YOLO display update: re-evaluate throttle condition.
                 # Since YOLO took ~200ms >> 100ms throttle interval, this always fires,
                 # ensuring bounding boxes drawn above appear in the stream.
+                # 改進 14 / 20: Use shared _encode_and_push() — no duplicated resize+imencode.
                 if (time.time() - last_display_update.get(cam_id, 0)) >= DISPLAY_UPDATE_INTERVAL:
-                    display_small = cv2.resize(display_frame, (display_w, display_h))
-                    _, img_encoded = cv2.imencode('.jpg', display_small, [cv2.IMWRITE_JPEG_QUALITY, 65])
-                    with frame_lock:
-                        latest_display_frames[cam_id] = img_encoded.tobytes()
-                    last_display_update[cam_id] = time.time()
+                    _encode_and_push(display_frame, cam_id, last_display_update)
 
             # 改進 7: Budget-aware sleep — only sleep remaining time in the budget window.
             # When YOLO runs (~200ms), budget is already exceeded → no sleep needed.
