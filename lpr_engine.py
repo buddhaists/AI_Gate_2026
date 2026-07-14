@@ -2619,17 +2619,14 @@ def main():
                         crop_y2 = min(h, int(_y_max * (1 + _margin)))
 
                     yolo_input = detection_frame[crop_y1:crop_y2, crop_x1:crop_x2]
-                    # 改進 3: conf=0.25 (was 0.15) filters low-quality detections before OCR.
-                    # iou=0.45 (was default 0.7) more aggressively suppresses overlapping
-                    # boxes — license plates are compact, duplicate boxes are noise.
+                    # conf=0.15: 改回原始值（0.25 在下午強光/逆光條件下會漏掉真實車牌）。
+                    # OCR 信心度閾值 (0.40/0.50/0.65) 仍負責過濾低品質讀取，
+                    # 所以降低 YOLO conf 不會增加誤報，只會恢復漏報的偵測。
+                    # iou=0.45: 積極抑制重複框（車牌框緊湊，重複框是雜訊）。
                     # 改進 5: Dynamic imgsz from crop dimensions.
-                    # YOLO resizes input to imgsz on its longest side. Since we now crop
-                    # to the PolygonZone bbox, the ROI is often <50% of the full frame.
-                    # Using a smaller imgsz reduces inference time proportionally.
-                    # Align to nearest multiple of 32 (YOLO requirement), clamp 320–640.
                     _crop_long = max(crop_x2 - crop_x1, crop_y2 - crop_y1)
                     _imgsz = max(320, min(640, (_crop_long // 32) * 32))
-                    results = model(yolo_input, conf=0.25, iou=0.45, imgsz=_imgsz, verbose=False)
+                    results = model(yolo_input, conf=0.15, iou=0.45, imgsz=_imgsz, verbose=False)
                     current_time = time.time()
                     
                     # Check if any plates were found (result boxes are relative to cropped image)
@@ -2679,7 +2676,7 @@ def main():
                     # window, enabling per-vehicle candidate grouping at window close.
                     if cam_id not in byte_trackers:
                         byte_trackers[cam_id] = sv.ByteTrack(
-                            track_activation_threshold=0.15,  # same as YOLO conf threshold
+                            track_activation_threshold=0.15,  # aligned with YOLO conf=0.15
                             lost_track_buffer=90,             # ~30s at 3fps YOLO cadence
                             minimum_matching_threshold=0.5,
                             frame_rate=3,
