@@ -97,7 +97,7 @@ DISPLAY_H = 360  # MJPEG output height (same value as before)
 def _make_display_frame(frame, cam_name, cam_id):
     """Create a display copy of frame with gate indicator and zone polygon overlay."""
     df = frame.copy()
-    if cam_name == "學校大門":
+    if cam_name == "001學校大門(正門)":
         left_color  = (0, 0, 255) if last_left_gate_closed  else (0, 255, 0)
         right_color = (0, 0, 255) if last_right_gate_closed else (0, 255, 0)
         cv2.rectangle(df, (600, 2),  (925, 75),  left_color,  2)
@@ -3061,7 +3061,7 @@ def main():
             # Check if "學校大門" is active. If not, default system_enabled to True under auto control
             has_gate_camera = False
             for active_name in list(active_camera_names.values()):
-                if active_name == "學校大門":
+                if active_name == "001學校大門(正門)":
                     has_gate_camera = True
                     break
             if not has_gate_camera and manual_override is None:
@@ -3184,7 +3184,7 @@ def main():
                     last_motion_times[cam_id] = time.time()
 
                 # Check gate state every 30 frames (approx. every 1 second) for "學校大門"
-                if cam_name == "學校大門" and cam_frame_count % 30 == 0:
+                if cam_name == "001學校大門(正門)" and cam_frame_count % 30 == 0:
                     is_closed, left_closed, right_closed = check_gate_closed(frame)
                     
                     if is_closed:
@@ -3234,7 +3234,7 @@ def main():
                 camera_lpr_active = True
                 if manual_override == 'paused':
                     camera_lpr_active = False
-                elif cam_name == "學校大門":
+                elif cam_name == "001學校大門(正門)":
                     camera_lpr_active = system_enabled
 
                 if not camera_lpr_active:
