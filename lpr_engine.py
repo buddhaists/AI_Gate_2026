@@ -2260,21 +2260,37 @@ def main():
                     diff = cv2.absdiff(prev_g, gray_small)
                     _, diff_thresh = cv2.threshold(diff, 8, 255, cv2.THRESH_BINARY)
                     
-                    # Threshold 150/120: filters out typical wind/leaves/compression noise (typically <80px), 
-                    # while motorcycles (120-400px) and cars (300-2000px) will trigger reliably.
-                    # We also check for consecutive motion frames to ignore single-frame keyframe glitches.
+                    # ── Improvement: Polygon-masked driveway motion detection ──────
+                    # Instead of a hardcoded box crop, we create a 320x180 black mask,
+                    # scale down the custom gate polygon (GATE_ZONE_POLYGONS) by 6x,
+                    # draw it on the mask, and bitwise-AND it with diff_thresh.
+                    # This ensures motion is ONLY evaluated inside the custom polygon zone,
+                    # completely ignoring background wind/leaves noise outside the zone.
                     raw_motion_detected = False
-                    if cam_name == "學校大門":
-                        driveway_diff_raw = diff_thresh[14:170, 10:310]
-                        changed_driveway_pixels = cv2.countNonZero(driveway_diff_raw)
-                        if changed_driveway_pixels >= 150:  # lowered from 450 to catch motorcycles
-                            raw_motion_detected = True
-                    elif cam_name == "學校大門002":
-                        driveway_diff_raw = diff_thresh[20:170, 10:310]
-                        changed_driveway_pixels = cv2.countNonZero(driveway_diff_raw)
-                        if changed_driveway_pixels >= 120:  # lowered from 350 to catch motorcycles
+                    poly = GATE_ZONE_POLYGONS.get(cam_id)
+                    if poly is not None:
+                        # Create black mask
+                        mask = np.zeros((180, 320), dtype=np.uint8)
+                        # Scale down polygon (1920x1080 -> 320x180, scale factor = 6)
+                        poly_small = (poly / 6.0).astype(np.int32)
+                        cv2.fillPoly(mask, [poly_small], 255)
+                        
+                        # Apply mask
+                        driveway_diff = cv2.bitwise_and(diff_thresh, mask)
+                        changed_driveway_pixels = cv2.countNonZero(driveway_diff)
+                        
+                        # Set adaptive threshold based on camera profile
+                        # (Motorcycles typically change >100 pixels in the scaled mask)
+                        motion_threshold = 100
+                        if cam_name == "學校大門":
+                            motion_threshold = 120
+                        elif cam_name == "學校大門002":
+                            motion_threshold = 100
+                            
+                        if changed_driveway_pixels >= motion_threshold:
                             raw_motion_detected = True
                     else:
+                        # Fallback to full frame motion detection if no polygon is set
                         changed_pixels = cv2.countNonZero(diff_thresh)
                         if changed_pixels >= 80:
                             raw_motion_detected = True
