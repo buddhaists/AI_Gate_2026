@@ -3051,8 +3051,8 @@ def main():
     # - use_doc_unwarping=False            : skip UVDoc document-unwarping model (not needed for plates)
     # - use_textline_orientation=False     : skip textline-orientation model (plates are horizontal)
     # - text_recognition_batch_size=1      : replaces deprecated rec_batch_num
-    # - text_det_score_thresh=0.5          : 提高 det 過濾門檻（預設 ~0.3），減少小圖雜訊 box
     # Result: only 2 models loaded (PP-OCRv6_medium_det + PP-OCRv6_medium_rec)
+    # Note: det noise reduction is handled by _parse_ocr_result() box-area filter.
     print("Initializing PaddleOCR v3.x (det+rec only, no doc preprocessor)...")
     ocr = PaddleOCR(
         lang='en',
@@ -3061,7 +3061,6 @@ def main():
         use_doc_unwarping=False,
         use_textline_orientation=False,
         text_recognition_batch_size=1,
-        text_det_score_thresh=0.5,
     )
 
     # ── 改進 8: Cache CLAHE object (created once, reused every frame) ─────────
@@ -3333,11 +3332,17 @@ def main():
                 # new function objects + closures on every frame (18/s for 3 cameras).
 
                 # Check if LPR is paused for this specific camera
+                # - manual_override='paused' : 使用者手動暫停，所有攝影機停止 LPR
+                # - system_enabled=False     : 大門偵測到關閉（夜間/假日）
+                #                             → 全部攝影機同步暫停，避免夜間誤觸發
+                #   原本只有 001 正門跟隨 system_enabled，其他攝影機（如 002）
+                #   仍持續偵測，導致車頭燈/陰影每晚觸發 200+ 次空偵測。
                 camera_lpr_active = True
                 if manual_override == 'paused':
                     camera_lpr_active = False
-                elif cam_name == "001學校大門(正門)":
-                    camera_lpr_active = system_enabled
+                elif not system_enabled:
+                    # 大門關閉 → 全攝影機暫停 LPR（節省 CPU，消除空觸發 log）
+                    camera_lpr_active = False
 
                 if not camera_lpr_active:
                     if do_display_update:
